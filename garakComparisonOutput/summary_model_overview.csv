@@ -1,0 +1,4 @@
+model,total_passed,total_samples,pass_rate,pass_percent,total_attempts,hit_attempts,hit_rate,digest_group_score_mean,groups_seen,eval_detector_pass_rate_mean,eval_detector_count
+llama3_uncensored_q4,3579.0,8815.0,0.40601247872943846,40.601247872943844,1254,1254,1.0,0.48086871693121697,9,0.5048920918367347,18
+qwen3_5_q8,123.0,125.0,0.984,98.4,125,125,1.0,0.984,1,0.984,1
+qwen3_5_q8_uncensored,4006.0,8811.0,0.45465894904097154,45.465894904097155,1250,1250,1.0,0.523297039660676,9,0.5445005714604446,18
