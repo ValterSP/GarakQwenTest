@@ -5,9 +5,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-def parse_filename(file_path: Path) -> Optional[Tuple[str, str]]:
+def parse_filename(file_path: Path, suffix: str) -> Optional[Tuple[str, str]]:
     name = file_path.name
-    suffix = ".report.jsonl"
     if not name.endswith(suffix):
         return None
 
@@ -71,6 +70,13 @@ def detector_scores_for_index(detector_results: Dict[str, Any], idx: int) -> Lis
     return scores
 
 
+def normalize_idx(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def text_from_content(content: Any) -> str:
     if isinstance(content, dict):
         return str(content.get("text") or "")
@@ -126,6 +132,27 @@ def extract_turns(item: Dict[str, Any], idx: int) -> List[Dict[str, str]]:
     return extract_turns_from_prompt_and_output(item, idx)
 
 
+def extract_turns_from_hitlog(item: Dict[str, Any]) -> List[Dict[str, str]]:
+    turns = []
+
+    prompt_turns = (item.get("prompt") or {}).get("turns") or []
+    for turn in prompt_turns:
+        if not isinstance(turn, dict):
+            continue
+        turns.append(
+            {
+                "role": str(turn.get("role") or "user"),
+                "text": text_from_content(turn.get("content")),
+            }
+        )
+
+    output = item.get("output")
+    if isinstance(output, dict):
+        turns.append({"role": "assistant", "text": str(output.get("text") or "")})
+
+    return turns
+
+
 def conversation_count(item: Dict[str, Any]) -> int:
     detector_results = item.get("detector_results") or {}
     detector_lengths = [
@@ -141,20 +168,34 @@ def conversation_count(item: Dict[str, Any]) -> int:
     )
 
 
-def conversation_rows(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+def conversation_rows(
+    item: Dict[str, Any],
+    hitlog_by_key: Optional[Dict[Tuple[str, int], Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     total = conversation_count(item)
     detector_results = item.get("detector_results") or {}
     rows = []
+    uuid = str(item.get("uuid") or "")
 
     for idx in range(total):
         detector_scores = detector_scores_for_index(detector_results, idx)
-        hit_detectors = [
-            score["name"] for score in detector_scores if score_is_hit(score.get("score"))
-        ]
+        hitlog_hit = hitlog_by_key.get((uuid, idx)) if hitlog_by_key is not None else None
+        if hitlog_by_key is not None:
+            hit_detectors = list(hitlog_hit.get("hit_detectors", [])) if hitlog_hit else []
+            hitlog_scores = list(hitlog_hit.get("detector_scores", [])) if hitlog_hit else []
+            is_hit = bool(hitlog_hit)
+            hit_source = "hitlog" if is_hit else "hitlog-miss"
+        else:
+            hit_detectors = [
+                score["name"] for score in detector_scores if score_is_hit(score.get("score"))
+            ]
+            hitlog_scores = []
+            is_hit = bool(hit_detectors)
+            hit_source = "detector_results"
 
         rows.append(
             {
-                "uuid": item.get("uuid", ""),
+                "uuid": uuid,
                 "seq": item.get("seq"),
                 "status": item.get("status"),
                 "goal": item.get("goal", ""),
@@ -163,8 +204,10 @@ def conversation_rows(item: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "conversation_idx": idx,
                 "conversation_total": total,
                 "detector_scores": detector_scores,
+                "hitlog_scores": hitlog_scores,
                 "hit_detectors": hit_detectors,
-                "is_hit": bool(hit_detectors),
+                "is_hit": is_hit,
+                "hit_source": hit_source,
                 "turns": extract_turns(item, idx),
             }
         )
@@ -172,18 +215,83 @@ def conversation_rows(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
-def collect_reports(report_dir: Path) -> Tuple[Dict[str, Any], int, int, int]:
+def collect_hitlogs(hitlog_dir: Path) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], int, int]:
+    hitlogs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    hitlog_file_count = 0
+    hit_count = 0
+
+    if not hitlog_dir.exists():
+        return hitlogs, hitlog_file_count, hit_count
+
+    for hitlog_path in sorted(hitlog_dir.glob("*.hitlog.jsonl")):
+        parsed = parse_filename(hitlog_path, ".hitlog.jsonl")
+        if not parsed:
+            continue
+
+        model, probe = parsed
+        hitlog_file_count += 1
+        bucket = hitlogs.setdefault((model, probe), {"hits": [], "by_key": {}})
+
+        for _, item in read_jsonl(hitlog_path):
+            attempt_id = str(item.get("attempt_id") or "")
+            if not attempt_id:
+                continue
+
+            attempt_idx = normalize_idx(item.get("attempt_idx"))
+            detector = str(item.get("detector") or "")
+            score = item.get("score")
+            score_row = {"name": detector, "score": score, "source": "hitlog"}
+            key = (attempt_id, attempt_idx)
+            existing = bucket["by_key"].get(key)
+
+            if existing is None:
+                existing = {
+                    "uuid": attempt_id,
+                    "seq": item.get("attempt_seq"),
+                    "status": None,
+                    "goal": item.get("goal", ""),
+                    "probe_classname": item.get("probe", ""),
+                    "challenge": "",
+                    "conversation_idx": attempt_idx,
+                    "conversation_total": item.get("generations_per_prompt") or 1,
+                    "detector_scores": [score_row],
+                    "hitlog_scores": [score_row],
+                    "hit_detectors": [detector] if detector else [],
+                    "is_hit": True,
+                    "hit_source": "hitlog",
+                    "source_file": hitlog_path.name,
+                    "turns": extract_turns_from_hitlog(item),
+                }
+                bucket["by_key"][key] = existing
+                bucket["hits"].append(existing)
+            else:
+                existing["detector_scores"].append(score_row)
+                existing["hitlog_scores"].append(score_row)
+                if detector and detector not in existing["hit_detectors"]:
+                    existing["hit_detectors"].append(detector)
+
+            hit_count += 1
+
+    return hitlogs, hitlog_file_count, hit_count
+
+
+def collect_reports(
+    report_dir: Path,
+    hitlogs: Optional[Dict[Tuple[str, str], Dict[str, Any]]] = None,
+) -> Tuple[Dict[str, Any], int, int, int]:
     dataset: Dict[str, Any] = {}
     report_count = 0
     attempt_count = 0
     conversation_count_total = 0
 
     for report_path in sorted(report_dir.glob("*.report.jsonl")):
-        parsed = parse_filename(report_path)
+        parsed = parse_filename(report_path, ".report.jsonl")
         if not parsed:
             continue
 
         model, probe = parsed
+        hitlog_data = (hitlogs or {}).get((model, probe))
+        hitlog_by_key = hitlog_data["by_key"] if hitlog_data else None
         report_count += 1
         attempts_by_uuid: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
 
@@ -197,13 +305,15 @@ def collect_reports(report_dir: Path) -> Tuple[Dict[str, Any], int, int, int]:
         for entries in attempts_by_uuid.values():
             final_attempt = pick_final_attempt(entries)
             attempt_count += 1
-            rows = conversation_rows(final_attempt)
+            rows = conversation_rows(final_attempt, hitlog_by_key=hitlog_by_key)
             conversation_count_total += len(rows)
             attempts.extend(rows)
 
         dataset.setdefault(model, {})[probe] = {
             "report_file": report_path.name,
+            "hitlog_file": f"{model}_{probe}.hitlog.jsonl" if hitlog_data else "",
             "attempts": attempts,
+            "hitlog_hits": list(hitlog_data["hits"]) if hitlog_data else [],
         }
 
     return dataset, report_count, attempt_count, conversation_count_total
@@ -315,6 +425,23 @@ def build_html(title: str, payload: str) -> str:
       font-size: 0.9rem;
     }}
 
+    .tabs {{
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }}
+
+    .tabs button {{
+      width: auto;
+      min-width: 150px;
+    }}
+
+    .tabs button.active {{
+      background: var(--ink);
+      border-color: var(--ink);
+      color: #fff;
+    }}
+
     .attempt {{
       background: var(--panel);
       border: 1px solid var(--line);
@@ -424,6 +551,10 @@ def build_html(title: str, payload: str) -> str:
         </select>
         <button id="reset" type="button">Reset Filters</button>
       </div>
+      <div class="tabs">
+        <button id="tabAll" class="active" type="button">All conversations</button>
+        <button id="tabHitlog" type="button">Hitlog hits</button>
+      </div>
       <div class="count" id="count"></div>
     </header>
 
@@ -451,6 +582,8 @@ def build_html(title: str, payload: str) -> str:
     const result = document.getElementById("result");
     const sort = document.getElementById("sort");
     const reset = document.getElementById("reset");
+    const tabAll = document.getElementById("tabAll");
+    const tabHitlog = document.getElementById("tabHitlog");
 
     const viewer = document.getElementById("viewer");
     const empty = document.getElementById("empty");
@@ -463,6 +596,7 @@ def build_html(title: str, payload: str) -> str:
 
     let filtered = [];
     let selectedIndex = 0;
+    let activeView = "all";
 
     function safe(v) {{
       return (v ?? "").toString();
@@ -497,7 +631,11 @@ def build_html(title: str, payload: str) -> str:
       const model = selectedModel();
       const probe = selectedProbe();
       const probeData = dataset?.[model]?.[probe];
-      return probeData?.attempts || [];
+      return activeView === "hitlog" ? (probeData?.hitlog_hits || []) : (probeData?.attempts || []);
+    }}
+
+    function currentViewLabel() {{
+      return activeView === "hitlog" ? "hitlog hits" : "conversations";
     }}
 
     function formatScore(score) {{
@@ -571,7 +709,7 @@ def build_html(title: str, payload: str) -> str:
       filtered = rows;
 
       const totalRaw = rowsForModelProbe().length;
-      count.textContent = `${{rows.length}} conversations shown of ${{totalRaw}} in this model/probe`;
+      count.textContent = `${{rows.length}} ${{currentViewLabel()}} shown of ${{totalRaw}} in this model/probe`;
 
       if (!filtered.length) {{
         viewer.classList.add("hidden");
@@ -604,7 +742,9 @@ def build_html(title: str, payload: str) -> str:
       const a = filtered[selectedIndex];
       const model = selectedModel();
       const probe = selectedProbe();
-      const reportName = dataset?.[model]?.[probe]?.report_file || "";
+      const probeData = dataset?.[model]?.[probe] || {{}};
+      const reportName = probeData.report_file || "";
+      const hitlogName = probeData.hitlog_file || a.source_file || "";
       const isHit = Boolean(a.is_hit);
       const convNumber = Number(a.conversation_idx || 0) + 1;
       const convTotal = Number(a.conversation_total || 1);
@@ -617,15 +757,21 @@ def build_html(title: str, payload: str) -> str:
         ? `<span class="badge status-hit">Hit detector: ${{escapeHtml((a.hit_detectors || []).join(", "))}}</span>`
         : "";
 
+      const hitSourceHtml = a.hit_source
+        ? `<span class="badge">Hit source: ${{escapeHtml(a.hit_source)}}</span>`
+        : "";
+
       meta.innerHTML = `
         <span class="badge">Model: ${{escapeHtml(model)}}</span>
         <span class="badge">Probe: ${{escapeHtml(probe)}}</span>
         <span class="badge">Report: ${{escapeHtml(reportName)}}</span>
+        ${{hitlogName ? `<span class="badge">Hitlog: ${{escapeHtml(hitlogName)}}</span>` : ""}}
         <span class="badge">UUID: ${{escapeHtml(a.uuid)}}</span>
         <span class="badge">Seq: ${{escapeHtml(a.seq)}}</span>
         <span class="badge">Conversation: #${{convNumber}}/${{convTotal}}</span>
         <span class="badge ${{resultClass(isHit)}}">Classification: ${{resultLabel(isHit)}}</span>
         <span class="badge">Detector scores: ${{escapeHtml(detectorSummary(a))}}</span>
+        ${{hitSourceHtml}}
         ${{hitDetectorHtml}}
         ${{challengeHtml}}
       `;
@@ -658,6 +804,17 @@ def build_html(title: str, payload: str) -> str:
       selectedIndex = 0;
       applyFilters();
     }});
+
+    function setActiveView(view) {{
+      activeView = view;
+      tabAll.classList.toggle("active", activeView === "all");
+      tabHitlog.classList.toggle("active", activeView === "hitlog");
+      selectedIndex = 0;
+      applyFilters();
+    }}
+
+    tabAll.addEventListener("click", () => setActiveView("all"));
+    tabHitlog.addEventListener("click", () => setActiveView("hitlog"));
 
     [q, result, sort].forEach(el =>
       el.addEventListener("input", () => {{
@@ -724,6 +881,12 @@ def main() -> None:
         help="Directory with *.report.jsonl files",
     )
     parser.add_argument(
+        "--hitlog-dir",
+        type=Path,
+        default=Path("garakProbesHitlog"),
+        help="Directory with *.hitlog.jsonl files used as the hit source of truth",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("report_chat_browser.html"),
@@ -736,12 +899,15 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    dataset, report_count, attempt_count, row_count = collect_reports(args.report_dir)
+    hitlogs, hitlog_file_count, hit_count = collect_hitlogs(args.hitlog_dir)
+    dataset, report_count, attempt_count, row_count = collect_reports(args.report_dir, hitlogs=hitlogs)
     html = build_html("Garak Chat Browser", json_for_script(dataset))
     args.output.write_text(html, encoding="utf-8")
 
     print(f"HTML generated: {args.output}")
     print(f"Reports loaded: {report_count}")
+    print(f"Hitlogs loaded: {hitlog_file_count}")
+    print(f"Hitlog rows loaded: {hit_count}")
     print(f"Unique attempts loaded: {attempt_count}")
     print(f"Conversation rows loaded: {row_count}")
 
