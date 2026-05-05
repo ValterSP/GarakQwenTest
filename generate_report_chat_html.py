@@ -389,6 +389,11 @@ def build_html(title: str, payload: str) -> str:
       margin-top: 10px;
     }}
 
+    .controls.navigation {{
+      grid-template-columns: minmax(180px, 1fr) 130px minmax(220px, 1.35fr) minmax(180px, 1fr);
+      margin-top: 12px;
+    }}
+
     input, select {{
       width: 100%;
       border-radius: 10px;
@@ -440,6 +445,31 @@ def build_html(title: str, payload: str) -> str:
       background: var(--ink);
       border-color: var(--ink);
       color: #fff;
+    }}
+
+    .review {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fffaf0;
+      padding: 10px;
+      margin-bottom: 12px;
+    }}
+
+    .review-status {{
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin: 0;
+    }}
+
+    .button-danger {{
+      background: #b42318;
+      border-color: #8f1f16;
+      color: #fff;
+      font-weight: 700;
+    }}
+
+    .button-danger:hover {{
+      background: #8f1f16;
     }}
 
     .attempt {{
@@ -526,6 +556,7 @@ def build_html(title: str, payload: str) -> str:
     @media (max-width: 860px) {{
       .controls {{ grid-template-columns: 1fr; }}
       .controls.secondary {{ grid-template-columns: 1fr; }}
+      .controls.navigation {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -560,10 +591,14 @@ def build_html(title: str, payload: str) -> str:
 
     <section class="attempt hidden" id="viewer">
       <div class="meta" id="meta"></div>
+      <div class="review">
+        <div class="review-status" id="reviewStatus"></div>
+      </div>
       <div class="goal" id="goal"></div>
       <div class="chat" id="chat"></div>
-      <div class="controls secondary" style="margin-top: 12px;">
+      <div class="controls navigation">
         <button id="prev" type="button">Previous Conversation</button>
+        <button id="markWrong" class="button-danger" type="button">Misclassified</button>
         <select id="attempt"></select>
         <button id="next" type="button">Next Conversation</button>
       </div>
@@ -584,6 +619,8 @@ def build_html(title: str, payload: str) -> str:
     const reset = document.getElementById("reset");
     const tabAll = document.getElementById("tabAll");
     const tabHitlog = document.getElementById("tabHitlog");
+    const reviewStatus = document.getElementById("reviewStatus");
+    const markWrong = document.getElementById("markWrong");
 
     const viewer = document.getElementById("viewer");
     const empty = document.getElementById("empty");
@@ -597,6 +634,8 @@ def build_html(title: str, payload: str) -> str:
     let filtered = [];
     let selectedIndex = 0;
     let activeView = "all";
+    const reviewStorageKey = "garakClassificationReviews.v1";
+    let reviews = loadReviews();
 
     function safe(v) {{
       return (v ?? "").toString();
@@ -650,6 +689,130 @@ def build_html(title: str, payload: str) -> str:
       const scores = a.detector_scores || [];
       if (!scores.length) return "none";
       return scores.map(d => `${{d.name}}=${{formatScore(d.score)}}`).join(" | ");
+    }}
+
+    function loadReviews() {{
+      try {{
+        return JSON.parse(localStorage.getItem(reviewStorageKey) || "{{}}");
+      }} catch (err) {{
+        console.warn("Could not load saved reviews", err);
+        return {{}};
+      }}
+    }}
+
+    function persistReviewsLocal() {{
+      try {{
+        localStorage.setItem(reviewStorageKey, JSON.stringify(reviews));
+      }} catch (err) {{
+        console.warn("Could not persist reviews locally", err);
+      }}
+    }}
+
+    function reviewKey(a) {{
+      return [
+        selectedModel(),
+        selectedProbe(),
+        safe(a.uuid),
+        safe(a.conversation_idx),
+      ].join("::");
+    }}
+
+    function currentClassification(a) {{
+      return Boolean(a.is_hit) ? "hit" : "pass";
+    }}
+
+    function correctedClassification(a) {{
+      return Boolean(a.is_hit) ? "pass" : "hit";
+    }}
+
+    function buildMisclassifiedReviewRecord(a) {{
+      const model = selectedModel();
+      const probe = selectedProbe();
+      const probeData = dataset?.[model]?.[probe] || {{}};
+      const key = reviewKey(a);
+      return {{
+        schema_version: 1,
+        review_key: key,
+        reviewed_at: new Date().toISOString(),
+        manual_review: "misclassified",
+        is_misclassified: true,
+        original_classification: currentClassification(a),
+        corrected_classification: correctedClassification(a),
+        model,
+        probe,
+        report_file: probeData.report_file || "",
+        hitlog_file: probeData.hitlog_file || a.source_file || "",
+        uuid: a.uuid,
+        seq: a.seq,
+        status: a.status,
+        conversation_idx: a.conversation_idx,
+        conversation_total: a.conversation_total,
+        hit_source: a.hit_source || "",
+        goal: a.goal || "",
+        probe_classname: a.probe_classname || "",
+        challenge: a.challenge || "",
+        hit_detectors: a.hit_detectors || [],
+        detector_scores: a.detector_scores || [],
+        hitlog_scores: a.hitlog_scores || [],
+        turns: a.turns || [],
+      }};
+    }}
+
+    function safeFilePart(s) {{
+      return safe(s).trim().replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "") || "unknown";
+    }}
+
+    function currentReviewFileName() {{
+      return `${{safeFilePart(selectedModel())}}_${{safeFilePart(selectedProbe())}}_misclassified_reviews.jsonl`;
+    }}
+
+    function reviewsForCurrentProbe() {{
+      const model = selectedModel();
+      const probe = selectedProbe();
+      return Object.values(reviews).filter(row => row.model === model && row.probe === probe);
+    }}
+
+    function reviewsAsJsonl(rows = reviewsForCurrentProbe()) {{
+      rows = rows.slice().sort((a, b) => safe(a.reviewed_at).localeCompare(safe(b.reviewed_at)));
+      return rows.map(row => JSON.stringify(row)).join("\\n") + (rows.length ? "\\n" : "");
+    }}
+
+    function saveMisclassifiedReview() {{
+      if (!filtered.length) return;
+      const a = filtered[selectedIndex];
+      const record = buildMisclassifiedReviewRecord(a);
+      reviews[record.review_key] = record;
+      persistReviewsLocal();
+      updateReviewStatus();
+      exportReviewFile();
+    }}
+
+    function exportReviewFile() {{
+      const jsonl = reviewsAsJsonl();
+      const blob = new Blob([jsonl], {{ type: "application/x-ndjson" }});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = currentReviewFileName();
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }}
+
+    function updateReviewStatus() {{
+      if (!filtered.length) {{
+        reviewStatus.textContent = "";
+        return;
+      }}
+
+      const a = filtered[selectedIndex];
+      const existing = reviews[reviewKey(a)];
+      const count = reviewsForCurrentProbe().length;
+      const existingText = existing
+        ? `Current conversation marked as misclassified at ${{existing.reviewed_at}}.`
+        : "Current conversation has not been marked as misclassified.";
+      reviewStatus.textContent = `${{existingText}} ${{count}} misclassification(s) saved for this model/probe. File: garakManualReviews/${{currentReviewFileName()}}.`;
     }}
 
     function populateModels() {{
@@ -792,6 +955,7 @@ def build_html(title: str, payload: str) -> str:
 
       prevBtn.disabled = selectedIndex <= 0;
       nextBtn.disabled = selectedIndex >= filtered.length - 1;
+      updateReviewStatus();
     }}
 
     modelSel.addEventListener("change", () => {{
@@ -815,6 +979,7 @@ def build_html(title: str, payload: str) -> str:
 
     tabAll.addEventListener("click", () => setActiveView("all"));
     tabHitlog.addEventListener("click", () => setActiveView("hitlog"));
+    markWrong.addEventListener("click", () => saveMisclassifiedReview());
 
     [q, result, sort].forEach(el =>
       el.addEventListener("input", () => {{
