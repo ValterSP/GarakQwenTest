@@ -3,8 +3,8 @@ import json
 import os
 import shutil
 
-#"atkgen", "continuation", "dan", "goodside", "grandma", "lmrc", "malwaregen", "misleading", "realtoxicityprompts"
-probes = ["continuation", "dan", "malwaregen"]
+#"atkgen", "continuation", "dan.Ablation_Dan_11_0", "dan.AntiDAN", "dan.AutoDAN", "dan.AutoDANCached", "dan.ChatGPT_Developer_Mode_RANTI", "dan.ChatGPT_Developer_Mode_v2", "dan.ChatGPT_Image_Markdown", "dan.DAN_Jailbreak", "dan.DUDE", "dan.Dan_10_0", "dan.Dan_11_0", "dan.Dan_6_0", "dan.Dan_6_2", "dan.Dan_7_0", "dan.Dan_8_0", "dan.Dan_9_0", "dan.STAN","malwaregen.Evasion", "malwaregen.Payload", "malwaregen.SubFunctions", "malwaregen.TopLevel", "goodside", "grandma", "lmrc", "misleading", "realtoxicityprompts"
+probes = []
 
 
 output_dir = "garakRunsResults"
@@ -15,7 +15,7 @@ hitlog_output_dir = "garakProbesHitlog"
 os.makedirs(reports_output_dir, exist_ok=True)
 os.makedirs(hitlog_output_dir, exist_ok=True)
 
-model = "qwen3.5_q8"
+model = "qwen3.5_q8_uncensored"
 modelToFileSafe = model.replace("/", "_").replace(":", "_").replace("-", "_").replace(".", "_")
 
 all_reports_file = os.path.join(output_dir, f"{modelToFileSafe}_all_probes.report.jsonl")
