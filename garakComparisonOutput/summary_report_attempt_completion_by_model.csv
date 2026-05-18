@@ -1,0 +1,3 @@
+model,total_attempts,completed_attempts,completion_rate,completion_percent
+qwen3_5_q8,1012,1012,1.0,100.0
+qwen3_5_q8_uncensored,1008,1008,1.0,100.0

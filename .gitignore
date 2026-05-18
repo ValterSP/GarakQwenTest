@@ -1,2 +1,5 @@
 .venv/
 .vscode/
+.cache/
+.matplotlib/
+__pycache__/

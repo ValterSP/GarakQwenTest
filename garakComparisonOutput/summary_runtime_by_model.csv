@@ -1,0 +1,3 @@
+model,duration_seconds,probes_completed,runs,duration_minutes,duration_hours
+qwen3_5_q8,370487.254931,28,28,6174.787582183333,102.91312636972222
+qwen3_5_q8_uncensored,56743.48092,28,28,945.724682,15.762078033333333

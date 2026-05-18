@@ -1,8 +1,14 @@
 import argparse
 import json
+import re
 from html import escape
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+PROBE_PREFIX_RE = re.compile(
+    r"_(?P<probe>(?:atkgen|continuation|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts)(?:\..+)?)$"
+)
 
 
 def parse_filename(file_path: Path, suffix: str) -> Optional[Tuple[str, str]]:
@@ -11,11 +17,36 @@ def parse_filename(file_path: Path, suffix: str) -> Optional[Tuple[str, str]]:
         return None
 
     stem = name[: -len(suffix)]
-    if "_" not in stem:
+    match = PROBE_PREFIX_RE.search(stem)
+    if not match:
         return None
 
-    model, probe = stem.rsplit("_", 1)
+    model = stem[: match.start()]
+    probe = match.group("probe")
     return model, probe
+
+
+def normalize_model_id(model_name: Optional[str]) -> Optional[str]:
+    if not model_name:
+        return None
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(model_name)).strip("_")
+
+
+def parse_timestamp(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    return str(value)
+
+
+def seconds_between(start: Optional[str], end: Optional[str]) -> Optional[float]:
+    if not start or not end:
+        return None
+    try:
+        from datetime import datetime
+
+        return max((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds(), 0.0)
+    except ValueError:
+        return None
 
 
 def read_jsonl(file_path: Path) -> Iterable[Tuple[int, Dict[str, Any]]]:
@@ -290,16 +321,65 @@ def collect_reports(
             continue
 
         model, probe = parsed
-        hitlog_data = (hitlogs or {}).get((model, probe))
-        hitlog_by_key = hitlog_data["by_key"] if hitlog_data else None
         report_count += 1
         attempts_by_uuid: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+        eval_passed = 0.0
+        eval_total = 0.0
+        eval_rows = []
+        start_time = None
+        end_time = None
+        target_type = ""
+        run_uuid = ""
 
         for line_no, item in read_jsonl(report_path):
-            if item.get("entry_type") != "attempt":
+            entry_type = item.get("entry_type")
+
+            if entry_type == "start_run setup":
+                model = normalize_model_id(item.get("plugins.target_name")) or model
+                probe = str(item.get("plugins.probe_spec") or probe)
+                start_time = parse_timestamp(item.get("transient.starttime_iso"))
+                target_type = str(item.get("plugins.target_type") or "")
+                run_uuid = str(item.get("transient.run_id") or "")
                 continue
+
+            if entry_type == "completion":
+                end_time = parse_timestamp(item.get("end_time"))
+                run_uuid = str(item.get("run") or run_uuid)
+                continue
+
+            if entry_type == "eval":
+                passed = item.get("passed")
+                total = item.get("total")
+                if passed is None or total in (None, 0):
+                    continue
+                try:
+                    passed = float(passed)
+                    total = float(total)
+                except (TypeError, ValueError):
+                    continue
+                eval_passed += passed
+                eval_total += total
+                eval_rows.append(
+                    {
+                        "probe": item.get("probe", probe),
+                        "detector": item.get("detector"),
+                        "passed": passed,
+                        "hits": total - passed,
+                        "total": total,
+                        "pass_rate": passed / total,
+                        "hit_rate": (total - passed) / total,
+                    }
+                )
+                continue
+
+            if entry_type != "attempt":
+                continue
+
             uuid = str(item.get("uuid") or f"{report_path.name}:{line_no}")
             attempts_by_uuid.setdefault(uuid, []).append((line_no, item))
+
+        hitlog_data = (hitlogs or {}).get((model, probe))
+        hitlog_by_key = hitlog_data["by_key"] if hitlog_data else None
 
         attempts = []
         for entries in attempts_by_uuid.values():
@@ -309,9 +389,30 @@ def collect_reports(
             conversation_count_total += len(rows)
             attempts.extend(rows)
 
+        eval_hits = eval_total - eval_passed
+        duration_seconds = seconds_between(start_time, end_time)
         dataset.setdefault(model, {})[probe] = {
             "report_file": report_path.name,
             "hitlog_file": f"{model}_{probe}.hitlog.jsonl" if hitlog_data else "",
+            "run": {
+                "run_uuid": run_uuid,
+                "target_type": target_type,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_seconds": duration_seconds,
+                "duration_minutes": duration_seconds / 60.0 if duration_seconds is not None else None,
+            },
+            "metrics": {
+                "passed": eval_passed,
+                "hits": eval_hits,
+                "total": eval_total,
+                "pass_rate": eval_passed / eval_total if eval_total else None,
+                "hit_rate": eval_hits / eval_total if eval_total else None,
+                "attempts": len(attempts_by_uuid),
+                "conversations": len(attempts),
+                "hitlog_hits": len(hitlog_data["hits"]) if hitlog_data else 0,
+                "eval_rows": eval_rows,
+            },
             "attempts": attempts,
             "hitlog_hits": list(hitlog_data["hits"]) if hitlog_data else [],
         }
@@ -551,12 +652,185 @@ def build_html(title: str, payload: str) -> str:
       color: var(--muted);
     }}
 
+    .dashboard {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+      margin-top: 12px;
+      overflow: hidden;
+    }}
+
+    .dashboard-controls {{
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+      gap: 10px;
+      margin-bottom: 12px;
+    }}
+
+    .dashboard-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }}
+
+    .metric-card {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 12px;
+    }}
+
+    .metric-card .label {{
+      display: block;
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 6px;
+    }}
+
+    .metric-card .value {{
+      display: block;
+      font-size: 1.35rem;
+      font-weight: 800;
+    }}
+
+    .comparison-table {{
+      width: 100%;
+      min-width: 860px;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 12px;
+      background: #fff;
+      border: 1px solid var(--line);
+    }}
+
+    .comparison-wrap {{
+      width: 100%;
+      overflow-x: auto;
+      border-radius: 12px;
+    }}
+
+    .comparison-table th,
+    .comparison-table td {{
+      border-bottom: 1px solid var(--line);
+      padding: 10px;
+      text-align: left;
+      vertical-align: middle;
+      font-size: 0.92rem;
+    }}
+
+    .comparison-table th {{
+      background: #f5efe3;
+      color: var(--muted);
+      font-weight: 700;
+    }}
+
+    .comparison-table tr:last-child td {{
+      border-bottom: 0;
+    }}
+
+    .rate-bar {{
+      min-width: 120px;
+    }}
+
+    .track {{
+      height: 8px;
+      border-radius: 999px;
+      background: #ece6dc;
+      overflow: hidden;
+      margin-top: 5px;
+    }}
+
+    .fill-pass,
+    .fill-hit {{
+      height: 100%;
+      border-radius: 999px;
+    }}
+
+    .fill-pass {{ background: var(--accent); }}
+    .fill-hit {{ background: #b42318; }}
+
+    .dashboard-note {{
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }}
+
+    .dashboard-charts {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }}
+
+    .chart-panel {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 12px;
+      min-width: 0;
+    }}
+
+    .chart-panel h2 {{
+      margin: 0 0 10px;
+      font-size: 1rem;
+      letter-spacing: 0;
+    }}
+
+    .chart-row {{
+      display: grid;
+      grid-template-columns: minmax(92px, 0.8fr) minmax(120px, 2fr) minmax(58px, auto);
+      gap: 8px;
+      align-items: center;
+      margin: 9px 0;
+      min-width: 0;
+    }}
+
+    .chart-label {{
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }}
+
+    .chart-value {{
+      text-align: right;
+      font-size: 0.86rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }}
+
+    .chart-track {{
+      height: 12px;
+      border-radius: 999px;
+      background: #ece6dc;
+      overflow: hidden;
+      min-width: 0;
+    }}
+
+    .chart-fill {{
+      height: 100%;
+      min-width: 2px;
+      border-radius: 999px;
+    }}
+
+    .chart-fill.pass {{ background: var(--accent); }}
+    .chart-fill.hit {{ background: #b42318; }}
+    .chart-fill.time {{ background: #456c99; }}
+    .chart-fill.evals {{ background: var(--accent-2); }}
+
     .hidden {{ display: none; }}
 
     @media (max-width: 860px) {{
       .controls {{ grid-template-columns: 1fr; }}
       .controls.secondary {{ grid-template-columns: 1fr; }}
       .controls.navigation {{ grid-template-columns: 1fr; }}
+      .dashboard-controls {{ grid-template-columns: 1fr; }}
+      .chart-row {{ grid-template-columns: 1fr; gap: 4px; }}
+      .chart-value {{ text-align: left; }}
     }}
   </style>
 </head>
@@ -585,9 +859,25 @@ def build_html(title: str, payload: str) -> str:
       <div class="tabs">
         <button id="tabAll" class="active" type="button">All conversations</button>
         <button id="tabHitlog" type="button">Hitlog hits</button>
+        <button id="tabDashboard" type="button">Dashboard</button>
       </div>
       <div class="count" id="count"></div>
     </header>
+
+    <section class="dashboard hidden" id="dashboard">
+      <div class="dashboard-controls">
+        <select id="dashboardProbe"></select>
+        <select id="dashboardSort">
+          <option value="model">Sort by model</option>
+          <option value="hit">Sort by highest hit rate</option>
+          <option value="time">Sort by slowest runtime</option>
+        </select>
+      </div>
+      <div class="dashboard-grid" id="dashboardTotals"></div>
+      <div id="dashboardComparison"></div>
+      <div class="dashboard-charts" id="dashboardCharts"></div>
+      <p class="dashboard-note">Pass and hit rates are computed from report eval rows: pass = passed / total, hit = (total - passed) / total.</p>
+    </section>
 
     <section class="attempt hidden" id="viewer">
       <div class="meta" id="meta"></div>
@@ -619,8 +909,16 @@ def build_html(title: str, payload: str) -> str:
     const reset = document.getElementById("reset");
     const tabAll = document.getElementById("tabAll");
     const tabHitlog = document.getElementById("tabHitlog");
+    const tabDashboard = document.getElementById("tabDashboard");
     const reviewStatus = document.getElementById("reviewStatus");
     const markWrong = document.getElementById("markWrong");
+
+    const dashboard = document.getElementById("dashboard");
+    const dashboardProbe = document.getElementById("dashboardProbe");
+    const dashboardSort = document.getElementById("dashboardSort");
+    const dashboardTotals = document.getElementById("dashboardTotals");
+    const dashboardComparison = document.getElementById("dashboardComparison");
+    const dashboardCharts = document.getElementById("dashboardCharts");
 
     const viewer = document.getElementById("viewer");
     const empty = document.getElementById("empty");
@@ -683,6 +981,66 @@ def build_html(title: str, payload: str) -> str:
         return score.toPrecision(4);
       }}
       return safe(score);
+    }}
+
+    function formatPercent(rate) {{
+      return typeof rate === "number" && Number.isFinite(rate)
+        ? `${{(rate * 100).toFixed(1)}}%`
+        : "n/a";
+    }}
+
+    function formatNumber(value) {{
+      return typeof value === "number" && Number.isFinite(value)
+        ? value.toLocaleString(undefined, {{ maximumFractionDigits: 0 }})
+        : "0";
+    }}
+
+    function formatMinutes(seconds) {{
+      if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "n/a";
+      const totalSeconds = Math.max(0, Math.round(seconds));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const remainingSeconds = totalSeconds % 60;
+      if (hours > 0) return `${{hours}}h ${{minutes}}m ${{remainingSeconds}}s`;
+      if (minutes > 0) return `${{minutes}}m ${{remainingSeconds}}s`;
+      return `${{remainingSeconds}}s`;
+    }}
+
+    function allModels() {{
+      return Object.keys(dataset).sort();
+    }}
+
+    function allProbeNames() {{
+      const probes = new Set();
+      allModels().forEach(model => {{
+        Object.keys(dataset?.[model] || {{}}).forEach(probe => probes.add(probe));
+      }});
+      return Array.from(probes).sort();
+    }}
+
+    function metricFor(model, probe) {{
+      return dataset?.[model]?.[probe]?.metrics || {{}};
+    }}
+
+    function runFor(model, probe) {{
+      return dataset?.[model]?.[probe]?.run || {{}};
+    }}
+
+    function modelTotals(model) {{
+      const probes = Object.values(dataset?.[model] || {{}});
+      const total = probes.reduce((sum, row) => sum + Number(row.metrics?.total || 0), 0);
+      const passed = probes.reduce((sum, row) => sum + Number(row.metrics?.passed || 0), 0);
+      const hits = probes.reduce((sum, row) => sum + Number(row.metrics?.hits || 0), 0);
+      const runtime = probes.reduce((sum, row) => sum + Number(row.run?.duration_seconds || 0), 0);
+      return {{
+        probes: probes.length,
+        total,
+        passed,
+        hits,
+        runtime,
+        pass_rate: total ? passed / total : null,
+        hit_rate: total ? hits / total : null,
+      }};
     }}
 
     function detectorSummary(a) {{
@@ -836,7 +1194,153 @@ def build_html(title: str, payload: str) -> str:
       probeSel.innerHTML = probes.map(p => `<option value="${{escapeHtml(p)}}">${{escapeHtml(p)}}</option>`).join("");
     }}
 
+    function populateDashboardProbes() {{
+      const probes = allProbeNames();
+      dashboardProbe.innerHTML = "";
+      if (!probes.length) {{
+        dashboardProbe.innerHTML = '<option value="">No probes found</option>';
+        return;
+      }}
+      dashboardProbe.innerHTML = probes.map(p => `<option value="${{escapeHtml(p)}}">${{escapeHtml(p)}}</option>`).join("");
+      if (probeSel.value && probes.includes(probeSel.value)) {{
+        dashboardProbe.value = probeSel.value;
+      }}
+    }}
+
+    function rateCell(rate, kind) {{
+      const value = typeof rate === "number" && Number.isFinite(rate) ? Math.max(0, Math.min(100, rate * 100)) : 0;
+      const fillClass = kind === "hit" ? "fill-hit" : "fill-pass";
+      return `
+        <div class="rate-bar">
+          <strong>${{formatPercent(rate)}}</strong>
+          <div class="track"><div class="${{fillClass}}" style="width: ${{value.toFixed(1)}}%"></div></div>
+        </div>
+      `;
+    }}
+
+    function chartRows(rows, valueGetter, labelGetter, className, maxValue = null) {{
+      const values = rows.map(row => Number(valueGetter(row) || 0));
+      const max = maxValue ?? Math.max(...values, 1);
+      return rows.map(row => {{
+        const rawValue = Number(valueGetter(row) || 0);
+        const width = max ? Math.max(0, Math.min(100, (rawValue / max) * 100)) : 0;
+        return `
+          <div class="chart-row">
+            <div class="chart-label" title="${{escapeHtml(row.model)}}">${{escapeHtml(row.model)}}</div>
+            <div class="chart-track"><div class="chart-fill ${{className}}" style="width: ${{width.toFixed(1)}}%"></div></div>
+            <div class="chart-value">${{escapeHtml(labelGetter(row))}}</div>
+          </div>
+        `;
+      }}).join("");
+    }}
+
+    function renderDashboardCharts(rows) {{
+      const chartOrder = rows.slice().sort((a, b) => a.model.localeCompare(b.model));
+      dashboardCharts.innerHTML = `
+        <div class="chart-panel">
+          <h2>Pass Rate</h2>
+          ${{chartRows(chartOrder, row => Number(row.pass_rate || 0), row => formatPercent(row.pass_rate), "pass", 1)}}
+        </div>
+        <div class="chart-panel">
+          <h2>Hit Rate</h2>
+          ${{chartRows(chartOrder, row => Number(row.hit_rate || 0), row => formatPercent(row.hit_rate), "hit", 1)}}
+        </div>
+        <div class="chart-panel">
+          <h2>Runtime</h2>
+          ${{chartRows(chartOrder, row => row.runtime, row => formatMinutes(row.runtime), "time")}}
+        </div>
+        <div class="chart-panel">
+          <h2>Total Evaluations</h2>
+          ${{chartRows(chartOrder, row => row.total, row => formatNumber(row.total), "evals")}}
+        </div>
+      `;
+    }}
+
+    function renderDashboard() {{
+      const probe = dashboardProbe.value || allProbeNames()[0] || "";
+      if (probe && dashboardProbe.value !== probe) dashboardProbe.value = probe;
+
+      const totals = allModels().map(model => ({{ model, ...modelTotals(model) }}));
+      dashboardTotals.innerHTML = totals.map(row => `
+        <div class="metric-card">
+          <span class="label">${{escapeHtml(row.model)}}</span>
+          <span class="value">${{formatPercent(row.hit_rate)}} hit</span>
+          <span class="label">${{formatNumber(row.probes)}} probes · ${{formatNumber(row.total)}} evals · ${{formatMinutes(row.runtime)}}</span>
+        </div>
+      `).join("");
+
+      let rows = allModels().map(model => {{
+        const metrics = metricFor(model, probe);
+        const run = runFor(model, probe);
+        return {{
+          model,
+          report_file: dataset?.[model]?.[probe]?.report_file || "",
+          passed: Number(metrics.passed || 0),
+          hits: Number(metrics.hits || 0),
+          total: Number(metrics.total || 0),
+          pass_rate: metrics.pass_rate,
+          hit_rate: metrics.hit_rate,
+          attempts: Number(metrics.attempts || 0),
+          conversations: Number(metrics.conversations || 0),
+          hitlog_hits: Number(metrics.hitlog_hits || 0),
+          runtime: Number(run.duration_seconds || 0),
+        }};
+      }});
+
+      if (dashboardSort.value === "hit") {{
+        rows.sort((a, b) => Number(b.hit_rate || 0) - Number(a.hit_rate || 0));
+      }} else if (dashboardSort.value === "time") {{
+        rows.sort((a, b) => b.runtime - a.runtime);
+      }} else {{
+        rows.sort((a, b) => a.model.localeCompare(b.model));
+      }}
+
+      const tableRows = rows.map(row => `
+        <tr>
+          <td><strong>${{escapeHtml(row.model)}}</strong><br><span class="sub">${{escapeHtml(row.report_file || "missing report")}}</span></td>
+          <td>${{rateCell(row.pass_rate, "pass")}}</td>
+          <td>${{rateCell(row.hit_rate, "hit")}}</td>
+          <td>${{formatNumber(row.total)}}</td>
+          <td>${{formatNumber(row.passed)}} / ${{formatNumber(row.hits)}}</td>
+          <td>${{formatNumber(row.attempts)}} / ${{formatNumber(row.conversations)}}</td>
+          <td>${{formatNumber(row.hitlog_hits)}}</td>
+          <td>${{formatMinutes(row.runtime)}}</td>
+        </tr>
+      `).join("");
+
+      dashboardComparison.innerHTML = `
+        <div class="comparison-wrap">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Pass rate</th>
+                <th>Hit rate</th>
+                <th>Total evals</th>
+                <th>Passed / Hits</th>
+                <th>Attempts / Chats</th>
+                <th>Hitlog hits</th>
+                <th>Runtime</th>
+              </tr>
+            </thead>
+            <tbody>${{tableRows || '<tr><td colspan="8">No dashboard data for this probe.</td></tr>'}}</tbody>
+          </table>
+        </div>
+      `;
+
+      renderDashboardCharts(rows);
+
+      count.textContent = probe
+        ? `Dashboard comparing ${{rows.length}} model(s) for probe "${{probe}}"; ${{allProbeNames().length}} total probe groups available`
+        : "Dashboard has no probes to compare";
+    }}
+
     function applyFilters() {{
+      if (activeView === "dashboard") {{
+        renderDashboard();
+        return;
+      }}
+
       const query = q.value.trim().toLowerCase();
       const selectedResult = result.value;
       const reverse = sort.value === "new";
@@ -973,12 +1477,20 @@ def build_html(title: str, payload: str) -> str:
       activeView = view;
       tabAll.classList.toggle("active", activeView === "all");
       tabHitlog.classList.toggle("active", activeView === "hitlog");
+      tabDashboard.classList.toggle("active", activeView === "dashboard");
       selectedIndex = 0;
+      const isDashboard = activeView === "dashboard";
+      dashboard.classList.toggle("hidden", !isDashboard);
+      viewer.classList.toggle("hidden", isDashboard);
+      empty.classList.toggle("hidden", isDashboard);
       applyFilters();
     }}
 
     tabAll.addEventListener("click", () => setActiveView("all"));
     tabHitlog.addEventListener("click", () => setActiveView("hitlog"));
+    tabDashboard.addEventListener("click", () => setActiveView("dashboard"));
+    dashboardProbe.addEventListener("change", () => renderDashboard());
+    dashboardSort.addEventListener("change", () => renderDashboard());
     markWrong.addEventListener("click", () => saveMisclassifiedReview());
 
     [q, result, sort].forEach(el =>
@@ -1019,6 +1531,7 @@ def build_html(title: str, payload: str) -> str:
 
     populateModels();
     populateProbes();
+    populateDashboardProbes();
     applyFilters();
   </script>
 </body>

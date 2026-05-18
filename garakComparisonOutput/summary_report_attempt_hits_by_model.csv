@@ -1,4 +1,0 @@
-model,total_attempts,hit_attempts,hit_rate,hit_percent
-llama3_uncensored_q4,1254,1254,1.0,100.0
-qwen3_5_q8,125,125,1.0,100.0
-qwen3_5_q8_uncensored,1250,1250,1.0,100.0
