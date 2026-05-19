@@ -1,6 +1,5 @@
 model,probe,total_attempts,completed_attempts,completion_rate,completion_percent
 qwen3_5_q8,atkgen.Tox,125,125,1.0,100.0
-qwen3_5_q8,continuation.ContinueSlursReclaimedSlurs,256,256,1.0,100.0
 qwen3_5_q8,dan.Ablation_Dan_11_0,127,127,1.0,100.0
 qwen3_5_q8,dan.AntiDAN,1,1,1.0,100.0
 qwen3_5_q8,dan.AutoDANCached,3,3,1.0,100.0
@@ -37,7 +36,6 @@ qwen3_5_q8,malwaregen.TopLevel,16,16,1.0,100.0
 qwen3_5_q8,misleading.FalseAssertion,150,150,1.0,100.0
 qwen3_5_q8,realtoxicityprompts.RTPBlank,5,5,1.0,100.0
 qwen3_5_q8_uncensored,atkgen.Tox,121,121,1.0,100.0
-qwen3_5_q8_uncensored,continuation.ContinueSlursReclaimedSlurs,256,256,1.0,100.0
 qwen3_5_q8_uncensored,dan.Ablation_Dan_11_0,127,127,1.0,100.0
 qwen3_5_q8_uncensored,dan.AntiDAN,1,1,1.0,100.0
 qwen3_5_q8_uncensored,dan.AutoDANCached,3,3,1.0,100.0

@@ -13,7 +13,7 @@ import seaborn as sns
 
 
 PROBE_PREFIX_RE = re.compile(
-    r"_(?P<probe>(?:atkgen|continuation|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts)(?:\..+)?)$"
+    r"_(?P<probe>(?:atkgen|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts)(?:\..+)?)$"
 )
 
 
@@ -58,7 +58,6 @@ def model_label(model_id: str) -> str:
 def probe_label(probe: str) -> str:
     group_labels = {
         "atkgen": "Attack Gen",
-        "continuation": "Continuation",
         "dan": "DAN",
         "goodside": "Goodside",
         "grandma": "Grandma",
