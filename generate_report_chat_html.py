@@ -562,6 +562,18 @@ def build_html(title: str, payload: str) -> str:
       margin: 0;
     }}
 
+    .review-actions {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 170px;
+      gap: 10px;
+      align-items: center;
+    }}
+
+    .review-actions button {{
+      padding: 8px 10px;
+      font-size: 0.85rem;
+    }}
+
     .button-danger {{
       background: #b42318;
       border-color: #8f1f16;
@@ -882,7 +894,10 @@ def build_html(title: str, payload: str) -> str:
     <section class="attempt hidden" id="viewer">
       <div class="meta" id="meta"></div>
       <div class="review">
-        <div class="review-status" id="reviewStatus"></div>
+        <div class="review-actions">
+          <div class="review-status" id="reviewStatus"></div>
+          <button id="syncReviews" type="button">Load saved reviews</button>
+        </div>
       </div>
       <div class="goal" id="goal"></div>
       <div class="chat" id="chat"></div>
@@ -912,6 +927,7 @@ def build_html(title: str, payload: str) -> str:
     const tabDashboard = document.getElementById("tabDashboard");
     const reviewStatus = document.getElementById("reviewStatus");
     const markWrong = document.getElementById("markWrong");
+    const syncReviews = document.getElementById("syncReviews");
 
     const dashboard = document.getElementById("dashboard");
     const dashboardProbe = document.getElementById("dashboardProbe");
@@ -934,7 +950,12 @@ def build_html(title: str, payload: str) -> str:
     let activeView = "all";
     const reviewStorageKey = "garakClassificationReviews.v1";
     let reviews = loadReviews();
+    let reviewDirectoryHandle = null;
     const reviewFileHandles = new Map();
+    const reviewFileHandleSources = new Map();
+    const syncedReviewFiles = new Set();
+    const syncingReviewFiles = new Set();
+    let lastReviewSaveStatus = "";
 
     function safe(v) {{
       return (v ?? "").toString();
@@ -1067,19 +1088,9 @@ def build_html(title: str, payload: str) -> str:
       }}
     }}
 
-    function reviewFileTypes() {{
-      return [{{
-        description: "JSONL review file",
-        accept: {{
-          "application/json": [".jsonl"],
-          "text/plain": [".jsonl"],
-        }},
-      }}];
-    }}
-
     function parseReviewJsonl(text) {{
       const rows = {{}};
-      text.split(/\r?\n/).forEach(line => {{
+      text.split(/\\r?\\n/).forEach(line => {{
         const trimmed = line.trim();
         if (!trimmed) return;
         try {{
@@ -1095,23 +1106,64 @@ def build_html(title: str, payload: str) -> str:
     }}
 
     async function readReviewsFromHandle(handle) {{
-      const file = await handle.getFile();
-      const text = await file.text();
-      return parseReviewJsonl(text);
+      try {{
+        const file = await handle.getFile();
+        const text = await file.text();
+        return parseReviewJsonl(text);
+      }} catch (err) {{
+        if (err?.name === "NotFoundError") return {{}};
+        throw err;
+      }}
     }}
 
-    async function chooseReviewFileHandle() {{
+    async function ensureReadWritePermission(handle) {{
+      const options = {{ mode: "readwrite" }};
+      if (!handle.queryPermission || !handle.requestPermission) return true;
+      if (await handle.queryPermission(options) === "granted") return true;
+      return await handle.requestPermission(options) === "granted";
+    }}
+
+    async function chooseReviewDirectoryHandle(promptUser = true) {{
+      if (reviewDirectoryHandle) return reviewDirectoryHandle;
+      if (!promptUser || !window.showDirectoryPicker) return null;
+      reviewStatus.textContent = `Choose the garakManualReviews folder to save ${{currentReviewFileName()}}.`;
+      const handle = await window.showDirectoryPicker({{
+        id: "garakManualReviews",
+        mode: "readwrite",
+      }});
+      if (handle.name !== "garakManualReviews") {{
+        throw new Error(`Selected "${{handle.name}}". Choose the garakManualReviews folder instead.`);
+      }}
+      if (!(await ensureReadWritePermission(handle))) {{
+        throw new Error("Write permission was not granted for the review directory.");
+      }}
+      reviewDirectoryHandle = handle;
+      return reviewDirectoryHandle;
+    }}
+
+    async function chooseReviewFileHandle({{ create = true, promptUser = true }} = {{}}) {{
       const fileName = currentReviewFileName();
       const existingHandle = reviewFileHandles.get(fileName);
-      if (existingHandle) return existingHandle;
-      if (!window.showSaveFilePicker) return null;
-      const handle = await window.showSaveFilePicker({{
-        suggestedName: fileName,
-        types: reviewFileTypes(),
-        excludeAcceptAllOption: false,
-      }});
-      reviewFileHandles.set(fileName, handle);
-      return handle;
+      if (existingHandle) {{
+        return {{
+          handle: existingHandle,
+          source: reviewFileHandleSources.get(fileName) || "selected file",
+        }};
+      }}
+      const directoryHandle = await chooseReviewDirectoryHandle(promptUser);
+      if (directoryHandle) {{
+        let handle = null;
+        try {{
+          handle = await directoryHandle.getFileHandle(fileName, {{ create }});
+        }} catch (err) {{
+          if (err?.name === "NotFoundError" && !create) return null;
+          throw err;
+        }}
+        reviewFileHandles.set(fileName, handle);
+        reviewFileHandleSources.set(fileName, "garakManualReviews folder");
+        return {{ handle, source: "garakManualReviews folder" }};
+      }}
+      return null;
     }}
 
     async function writeReviewsToHandle(handle, rows) {{
@@ -1140,6 +1192,14 @@ def build_html(title: str, payload: str) -> str:
       return Boolean(a.is_hit) ? "pass" : "hit";
     }}
 
+    function currentHitMissResult(a) {{
+      return Boolean(a.is_hit) ? "hit" : "miss";
+    }}
+
+    function correctedHitMissResult(a) {{
+      return Boolean(a.is_hit) ? "miss" : "hit";
+    }}
+
     function buildMisclassifiedReviewRecord(a) {{
       const model = selectedModel();
       const probe = selectedProbe();
@@ -1151,6 +1211,9 @@ def build_html(title: str, payload: str) -> str:
         reviewed_at: new Date().toISOString(),
         manual_review: "misclassified",
         is_misclassified: true,
+        was_hit: Boolean(a.is_hit),
+        original_result: currentHitMissResult(a),
+        corrected_result: correctedHitMissResult(a),
         original_classification: currentClassification(a),
         corrected_classification: correctedClassification(a),
         model,
@@ -1190,7 +1253,69 @@ def build_html(title: str, payload: str) -> str:
     function reviewsAsJsonl(rows = reviewsForCurrentProbe()) {{
       const items = Array.isArray(rows) ? rows.slice() : Object.values(rows || {{}});
       items.sort((a, b) => safe(a.reviewed_at).localeCompare(safe(b.reviewed_at)));
-      return items.map(row => JSON.stringify(row)).join("\n") + (items.length ? "\n" : "");
+      return items.map(row => JSON.stringify(row)).join("\\n") + (items.length ? "\\n" : "");
+    }}
+
+    function removeCachedReviewsForCurrentProbe() {{
+      const model = selectedModel();
+      const probe = selectedProbe();
+      Object.keys(reviews).forEach(key => {{
+        const row = reviews[key];
+        if (row?.model === model && row?.probe === probe) {{
+          delete reviews[key];
+        }}
+      }});
+    }}
+
+    function replaceReviewsForCurrentProbe(rows) {{
+      removeCachedReviewsForCurrentProbe();
+      Object.values(rows || {{}}).forEach(row => {{
+        if (row && row.review_key) reviews[row.review_key] = row;
+      }});
+      persistReviewsLocal();
+    }}
+
+    function mergeReviewRows(rows) {{
+      Object.values(rows || {{}}).forEach(row => {{
+        if (row && row.review_key) reviews[row.review_key] = row;
+      }});
+      persistReviewsLocal();
+    }}
+
+    async function syncReviewsForCurrentProbe({{ promptUser = false }} = {{}}) {{
+      const fileName = currentReviewFileName();
+      if (!fileName || syncingReviewFiles.has(fileName)) return false;
+      if (!promptUser && (!reviewDirectoryHandle || syncedReviewFiles.has(fileName))) return false;
+
+      syncingReviewFiles.add(fileName);
+      try {{
+        const selection = await chooseReviewFileHandle({{
+          create: false,
+          promptUser,
+        }});
+        if (!selection) {{
+          if (promptUser) {{
+            lastReviewSaveStatus = `No existing review file found for ${{fileName}}. It will be created on first save.`;
+            updateReviewStatus();
+          }}
+          return false;
+        }}
+
+        const rows = await readReviewsFromHandle(selection.handle);
+        replaceReviewsForCurrentProbe(rows);
+        syncedReviewFiles.add(fileName);
+        lastReviewSaveStatus = `Loaded ${{Object.keys(rows).length}} review(s) from ${{selection.source}}/${{fileName}} and refreshed the browser cache.`;
+        updateReviewStatus();
+        return true;
+      }} catch (err) {{
+        if (err?.name === "AbortError") return false;
+        lastReviewSaveStatus = `Could not load saved reviews: ${{err?.message || err}}`;
+        console.warn("Could not load saved reviews", err);
+        updateReviewStatus();
+        return false;
+      }} finally {{
+        syncingReviewFiles.delete(fileName);
+      }}
     }}
 
     function updateMisclassifiedButton(existing) {{
@@ -1205,42 +1330,38 @@ def build_html(title: str, payload: str) -> str:
       if (!filtered.length) return;
       const a = filtered[selectedIndex];
       const record = buildMisclassifiedReviewRecord(a);
-      reviews[record.review_key] = record;
-      persistReviewsLocal();
+      lastReviewSaveStatus = "";
       try {{
-        const handle = await chooseReviewFileHandle();
-        if (!handle) {{
-          exportReviewFile();
+        const selection = await chooseReviewFileHandle({{ create: true, promptUser: true }});
+        if (!selection) {{
+          lastReviewSaveStatus = "Could not write directly. Open this page in Chrome or Edge and choose the garakManualReviews folder when prompted.";
           updateReviewStatus();
-          goToNextConversation();
           return;
         }}
 
+        const handle = selection.handle;
         const existingRows = await readReviewsFromHandle(handle);
+        if (existingRows[record.review_key]) {{
+          replaceReviewsForCurrentProbe(existingRows);
+          syncedReviewFiles.add(currentReviewFileName());
+          lastReviewSaveStatus = `Already marked in ${{selection.source}}/${{currentReviewFileName()}}.`;
+          updateReviewStatus();
+          return;
+        }}
+
         existingRows[record.review_key] = record;
-        reviews[record.review_key] = record;
-        persistReviewsLocal();
         await writeReviewsToHandle(handle, existingRows);
+        replaceReviewsForCurrentProbe(existingRows);
+        syncedReviewFiles.add(currentReviewFileName());
+        lastReviewSaveStatus = `Saved JSONL to ${{selection.source}}/${{currentReviewFileName()}}.`;
         updateReviewStatus();
         goToNextConversation();
       }} catch (err) {{
         if (err?.name === "AbortError") return;
+        lastReviewSaveStatus = `Could not save review: ${{err?.message || err}}`;
         console.warn("Could not save misclassified review", err);
         updateReviewStatus();
       }}
-    }}
-
-    function exportReviewFile() {{
-      const jsonl = reviewsAsJsonl();
-      const blob = new Blob([jsonl], {{ type: "application/x-ndjson" }});
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = currentReviewFileName();
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
     }}
 
     function goToNextConversation() {{
@@ -1265,7 +1386,8 @@ def build_html(title: str, payload: str) -> str:
       const existingText = existing
         ? `Current conversation marked as misclassified at ${{existing.reviewed_at}}.`
         : "Current conversation has not been marked as misclassified.";
-      reviewStatus.textContent = `${{existingText}} ${{count}} misclassification(s) saved for this model/probe. File: garakManualReviews/${{currentReviewFileName()}}.`;
+      const saveText = lastReviewSaveStatus || `Target file: garakManualReviews/${{currentReviewFileName()}}.`;
+      reviewStatus.textContent = `${{existingText}} ${{count}} misclassification(s) saved for this model/probe. ${{saveText}}`;
     }}
 
     function populateModels() {{
@@ -1555,6 +1677,7 @@ def build_html(title: str, payload: str) -> str:
       prevBtn.disabled = selectedIndex <= 0;
       nextBtn.disabled = selectedIndex >= filtered.length - 1;
       updateReviewStatus();
+      syncReviewsForCurrentProbe({{ promptUser: false }});
     }}
 
     modelSel.addEventListener("change", () => {{
@@ -1587,6 +1710,7 @@ def build_html(title: str, payload: str) -> str:
     dashboardProbe.addEventListener("change", () => renderDashboard());
     dashboardSort.addEventListener("change", () => renderDashboard());
     markWrong.addEventListener("click", () => saveMisclassifiedReview());
+    syncReviews.addEventListener("click", () => syncReviewsForCurrentProbe({{ promptUser: true }}));
 
     [q, result, sort].forEach(el =>
       el.addEventListener("input", () => {{
