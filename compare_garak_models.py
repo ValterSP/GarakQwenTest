@@ -143,7 +143,7 @@ def collect_manual_review_rows(review_dir: Path) -> pd.DataFrame:
         for row in read_jsonl(file_path):
             review_key = row.get("review_key")
             model = normalize_model_id(row.get("model")) or row.get("model")
-            probe = row.get("probe")
+            probe = row.get("probe_classname") or row.get("probe")
             if not review_key or not model or not probe:
                 continue
             if row.get("is_misclassified") is False:
@@ -610,17 +610,15 @@ def save_manual_misclassification_plot(
     plot_data = manual_misclassification[
         (manual_misclassification["target_model_type"] == target_model_type)
         & (manual_misclassification["original_kind"] == original_kind)
+        & (manual_misclassification["scope"] == "probe")
     ].copy()
     if plot_data.empty:
         return
 
-    global_rows = plot_data[plot_data["scope"] == "global"].copy()
-    probe_rows = plot_data[plot_data["scope"] == "probe"].copy()
-    probe_rows = probe_rows.sort_values(
+    plot_data = plot_data.sort_values(
         ["misclassified_percent", "denominator", "probe_label"],
         ascending=[False, False, True],
     )
-    plot_data = pd.concat([global_rows, probe_rows], ignore_index=True)
     order = plot_data["probe_label"].drop_duplicates().tolist()
 
     height = max(6, len(order) * 0.38)

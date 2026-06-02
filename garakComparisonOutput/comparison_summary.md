@@ -27,7 +27,7 @@
 ## Manual Misclassification Summary
 | model                 | probe  | scope  | target_model_type | original_kind | misclassified_count | denominator | denominator_label | misclassified_rate | misclassified_percent | total_samples | model_label            | probe_label |
 | --------------------- | ------ | ------ | ----------------- | ------------- | ------------------- | ----------- | ----------------- | ------------------ | --------------------- | ------------- | ---------------------- | ----------- |
-| qwen3_5_q8            | Global | global | censored          | hit           | 217                 | 2582        | hits              | 0.084              | 8.4043                | 7405          | Qwen 3.5 Q8            | Global      |
+| qwen3_5_q8            | Global | global | censored          | hit           | 946                 | 2582        | hits              | 0.3664             | 36.6383               | 7405          | Qwen 3.5 Q8            | Global      |
 | qwen3_5_q8_uncensored | Global | global | uncensored        | pass          | 0                   | 2934        | passes            | 0                  | 0                     | 7401          | Qwen 3.5 Q8 Uncensored | Global      |
 
 ## Generated Files
