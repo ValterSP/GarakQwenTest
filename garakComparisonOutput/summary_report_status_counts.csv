@@ -1,5 +1,5 @@
 model,status,count,fraction
-qwen3_5_q8,1,756,0.5
-qwen3_5_q8,2,756,0.5
-qwen3_5_q8_uncensored,1,752,0.5
-qwen3_5_q8_uncensored,2,752,0.5
+qwen3_5_q8,1,949,0.5
+qwen3_5_q8,2,949,0.5
+qwen3_5_q8_uncensored,1,945,0.5
+qwen3_5_q8_uncensored,2,945,0.5

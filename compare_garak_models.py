@@ -1,8 +1,13 @@
 import argparse
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "garak-matplotlib-cache"))
+os.environ.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "garak-cache"))
 
 import matplotlib
 
@@ -53,6 +58,10 @@ def model_label(model_id: str) -> str:
         "qwen3_5_q8_uncensored": "Qwen 3.5 Q8 Uncensored",
     }
     return labels.get(model_id, str(model_id).replace("_", " "))
+
+
+def is_uncensored_model(model_id: str) -> bool:
+    return "uncensored" in str(model_id).lower()
 
 
 def probe_label(probe: str) -> str:
@@ -123,6 +132,47 @@ def read_jsonl(file_path: Path) -> Iterable[dict]:
                 yield json.loads(line)
             except json.JSONDecodeError:
                 continue
+
+
+def collect_manual_review_rows(review_dir: Path) -> pd.DataFrame:
+    rows = {}
+    if not review_dir.exists():
+        return pd.DataFrame()
+
+    for file_path in sorted(review_dir.glob("*_misclassified_reviews.jsonl")):
+        for row in read_jsonl(file_path):
+            review_key = row.get("review_key")
+            model = normalize_model_id(row.get("model")) or row.get("model")
+            probe = row.get("probe")
+            if not review_key or not model or not probe:
+                continue
+            if row.get("is_misclassified") is False:
+                continue
+
+            original_result = str(
+                row.get("original_result") or row.get("original_classification") or ""
+            ).lower()
+            was_hit = row.get("was_hit")
+            if isinstance(was_hit, bool):
+                original_kind = "hit" if was_hit else "pass"
+            elif original_result == "hit":
+                original_kind = "hit"
+            elif original_result in {"miss", "pass"}:
+                original_kind = "pass"
+            else:
+                original_kind = ""
+
+            rows[str(review_key)] = {
+                "review_key": str(review_key),
+                "model": model,
+                "probe": probe,
+                "original_kind": original_kind,
+                "manual_review": row.get("manual_review", "misclassified"),
+                "reviewed_at": row.get("reviewed_at"),
+                "source_file": file_path.name,
+            }
+
+    return pd.DataFrame(rows.values())
 
 
 def collect_report_rows(
@@ -380,6 +430,142 @@ def summarize_eval_by_model(report_eval_summary: pd.DataFrame) -> pd.DataFrame:
     return by_model
 
 
+def summarize_manual_misclassification_by_probe(
+    eval_by_probe: pd.DataFrame,
+    manual_reviews: pd.DataFrame,
+) -> pd.DataFrame:
+    if eval_by_probe.empty:
+        return pd.DataFrame()
+
+    base = eval_by_probe[
+        ["model", "probe", "total_passed", "total_hits", "total_samples"]
+    ].copy()
+
+    scenarios = [
+        {
+            "target_model_type": "censored",
+            "original_kind": "hit",
+            "denominator_column": "total_hits",
+            "denominator_label": "hits",
+            "include_model": lambda model: not is_uncensored_model(model),
+        },
+        {
+            "target_model_type": "uncensored",
+            "original_kind": "pass",
+            "denominator_column": "total_passed",
+            "denominator_label": "passes",
+            "include_model": is_uncensored_model,
+        },
+    ]
+
+    summary_rows = []
+    for scenario in scenarios:
+        model_base = base[base["model"].map(scenario["include_model"])].copy()
+        if model_base.empty:
+            continue
+
+        if manual_reviews.empty:
+            counts = pd.DataFrame(columns=["model", "probe", "misclassified_count"])
+        else:
+            review_rows = manual_reviews[
+                (manual_reviews["original_kind"] == scenario["original_kind"])
+                & (manual_reviews["model"].map(scenario["include_model"]))
+            ].copy()
+            counts = (
+                review_rows.groupby(["model", "probe"], as_index=False)
+                .agg(misclassified_count=("review_key", "nunique"))
+                if not review_rows.empty
+                else pd.DataFrame(columns=["model", "probe", "misclassified_count"])
+            )
+
+        merged = model_base.merge(counts, on=["model", "probe"], how="left")
+        merged["misclassified_count"] = merged["misclassified_count"].fillna(0).astype(int)
+        merged["denominator"] = pd.to_numeric(
+            merged[scenario["denominator_column"]], errors="coerce"
+        ).fillna(0)
+        merged["misclassified_rate"] = merged.apply(
+            lambda row: row["misclassified_count"] / row["denominator"]
+            if row["denominator"]
+            else 0.0,
+            axis=1,
+        )
+        merged["misclassified_percent"] = merged["misclassified_rate"] * 100.0
+        merged["scope"] = "probe"
+        merged["target_model_type"] = scenario["target_model_type"]
+        merged["original_kind"] = scenario["original_kind"]
+        merged["denominator_label"] = scenario["denominator_label"]
+
+        global_rows = (
+            merged.groupby("model", as_index=False)
+            .agg(
+                misclassified_count=("misclassified_count", "sum"),
+                denominator=("denominator", "sum"),
+                total_samples=("total_samples", "sum"),
+            )
+        )
+        global_rows["probe"] = "Global"
+        global_rows["misclassified_rate"] = global_rows.apply(
+            lambda row: row["misclassified_count"] / row["denominator"]
+            if row["denominator"]
+            else 0.0,
+            axis=1,
+        )
+        global_rows["misclassified_percent"] = global_rows["misclassified_rate"] * 100.0
+        global_rows["scope"] = "global"
+        global_rows["target_model_type"] = scenario["target_model_type"]
+        global_rows["original_kind"] = scenario["original_kind"]
+        global_rows["denominator_label"] = scenario["denominator_label"]
+
+        summary_rows.append(
+            pd.concat(
+                [
+                    global_rows[
+                        [
+                            "model",
+                            "probe",
+                            "scope",
+                            "target_model_type",
+                            "original_kind",
+                            "misclassified_count",
+                            "denominator",
+                            "denominator_label",
+                            "misclassified_rate",
+                            "misclassified_percent",
+                            "total_samples",
+                        ]
+                    ],
+                    merged[
+                        [
+                            "model",
+                            "probe",
+                            "scope",
+                            "target_model_type",
+                            "original_kind",
+                            "misclassified_count",
+                            "denominator",
+                            "denominator_label",
+                            "misclassified_rate",
+                            "misclassified_percent",
+                            "total_samples",
+                        ]
+                    ],
+                ],
+                ignore_index=True,
+            )
+        )
+
+    if not summary_rows:
+        return pd.DataFrame()
+
+    summary = pd.concat(summary_rows, ignore_index=True)
+    summary["model_label"] = summary["model"].map(model_label)
+    summary["probe_label"] = summary["probe"].map(probe_label)
+    return summary.sort_values(
+        ["target_model_type", "model", "scope", "probe"],
+        ascending=[True, True, True, True],
+    )
+
+
 def summarize_run_times(run_rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if run_rows.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -414,6 +600,82 @@ def summarize_run_times(run_rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFr
     return by_probe, by_model
 
 
+def save_manual_misclassification_plot(
+    manual_misclassification: pd.DataFrame,
+    target_model_type: str,
+    original_kind: str,
+    output_path: Path,
+    title: str,
+) -> None:
+    plot_data = manual_misclassification[
+        (manual_misclassification["target_model_type"] == target_model_type)
+        & (manual_misclassification["original_kind"] == original_kind)
+    ].copy()
+    if plot_data.empty:
+        return
+
+    global_rows = plot_data[plot_data["scope"] == "global"].copy()
+    probe_rows = plot_data[plot_data["scope"] == "probe"].copy()
+    probe_rows = probe_rows.sort_values(
+        ["misclassified_percent", "denominator", "probe_label"],
+        ascending=[False, False, True],
+    )
+    plot_data = pd.concat([global_rows, probe_rows], ignore_index=True)
+    order = plot_data["probe_label"].drop_duplicates().tolist()
+
+    height = max(6, len(order) * 0.38)
+    plt.figure(figsize=(12, height))
+    ax = sns.barplot(
+        data=plot_data,
+        y="probe_label",
+        x="misclassified_percent",
+        hue="model_label",
+        order=order,
+    )
+    add_percent_labels(ax)
+    plt.title(title)
+    plt.xlabel("Manually marked misclassified (%)")
+    plt.ylabel("Probe")
+    plt.xlim(0, 100)
+    plt.legend(title="Model")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
+def save_manual_misclassification_global_plot(
+    manual_misclassification: pd.DataFrame,
+    target_model_type: str,
+    original_kind: str,
+    output_path: Path,
+    title: str,
+) -> None:
+    plot_data = manual_misclassification[
+        (manual_misclassification["target_model_type"] == target_model_type)
+        & (manual_misclassification["original_kind"] == original_kind)
+        & (manual_misclassification["scope"] == "global")
+    ].copy()
+    if plot_data.empty:
+        return
+
+    plot_data = plot_data.sort_values("model_label")
+    plt.figure(figsize=(8, 4.8))
+    ax = sns.barplot(
+        data=plot_data,
+        x="model_label",
+        y="misclassified_percent",
+        color="#5f6f9f" if target_model_type == "uncensored" else "#9f4c4c",
+    )
+    add_percent_labels(ax)
+    plt.title(title)
+    plt.xlabel("Model")
+    plt.ylabel("Manually marked misclassified (%)")
+    plt.ylim(0, 100)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
 def save_plots(
     eval_by_model: pd.DataFrame,
     eval_by_probe: pd.DataFrame,
@@ -422,6 +684,7 @@ def save_plots(
     digest_probe_rows: pd.DataFrame,
     run_time_by_probe: pd.DataFrame,
     run_time_by_model: pd.DataFrame,
+    manual_misclassification: pd.DataFrame,
     output_dir: Path,
 ) -> None:
     sns.set_theme(style="whitegrid")
@@ -652,6 +915,36 @@ def save_plots(
         plt.savefig(output_dir / "plot_runtime_by_probe_and_model.png", dpi=180)
         plt.close()
 
+    if not manual_misclassification.empty:
+        save_manual_misclassification_plot(
+            manual_misclassification,
+            target_model_type="censored",
+            original_kind="hit",
+            output_path=output_dir / "plot_manual_misclassified_hits_censored_by_probe.png",
+            title="Manual Misclassified Hits by Probe - Censored Model",
+        )
+        save_manual_misclassification_global_plot(
+            manual_misclassification,
+            target_model_type="censored",
+            original_kind="hit",
+            output_path=output_dir / "plot_manual_misclassified_hits_censored_global.png",
+            title="Global Manual Misclassified Hits - Censored Model",
+        )
+        save_manual_misclassification_plot(
+            manual_misclassification,
+            target_model_type="uncensored",
+            original_kind="pass",
+            output_path=output_dir / "plot_manual_misclassified_passes_uncensored_by_probe.png",
+            title="Manual Misclassified Passes by Probe - Uncensored Model",
+        )
+        save_manual_misclassification_global_plot(
+            manual_misclassification,
+            target_model_type="uncensored",
+            original_kind="pass",
+            output_path=output_dir / "plot_manual_misclassified_passes_uncensored_global.png",
+            title="Global Manual Misclassified Passes - Uncensored Model",
+        )
+
 
 def create_overview_table(
     attempt_completion_by_model: pd.DataFrame,
@@ -705,6 +998,7 @@ def write_markdown_summary(
     eval_by_model: pd.DataFrame,
     overview: pd.DataFrame,
     run_time_by_model: pd.DataFrame,
+    manual_misclassification: pd.DataFrame,
 ) -> None:
     lines = []
     lines.append("# Garak Model Comparison Summary")
@@ -713,6 +1007,7 @@ def write_markdown_summary(
     lines.append("- Primary source: report JSONL metadata, attempts, evals, digest and completion timestamps")
     lines.append("- Pass rate is `passed / total`; hit rate is `(total - passed) / total` from eval rows.")
     lines.append("- Attempt status is only kept as run completion metadata, not as hit rate.")
+    lines.append("- Manual misclassification charts use saved `garakManualReviews` rows as the numerator.")
     lines.append("")
 
     if not eval_by_model.empty:
@@ -730,6 +1025,12 @@ def write_markdown_summary(
         lines.append(dataframe_to_markdown(overview))
         lines.append("")
 
+    if not manual_misclassification.empty:
+        lines.append("## Manual Misclassification Summary")
+        manual_global = manual_misclassification[manual_misclassification["scope"] == "global"].copy()
+        lines.append(dataframe_to_markdown(manual_global))
+        lines.append("")
+
     lines.append("## Generated Files")
     lines.append("- raw_report_attempts.csv")
     lines.append("- summary_report_attempt_completion_by_model.csv")
@@ -744,6 +1045,7 @@ def write_markdown_summary(
     lines.append("- summary_runtime_by_probe.csv")
     lines.append("- summary_runtime_by_model.csv")
     lines.append("- summary_model_overview.csv")
+    lines.append("- summary_manual_misclassification_by_probe.csv")
     lines.append("- plot_eval_pass_rate_by_model.png")
     lines.append("- plot_eval_hit_rate_by_model.png")
     lines.append("- plot_eval_pass_rate_by_probe_heatmap.png")
@@ -754,6 +1056,10 @@ def write_markdown_summary(
     lines.append("- plot_digest_probe_score_heatmap.png")
     lines.append("- plot_runtime_total_by_model.png")
     lines.append("- plot_runtime_by_probe_and_model.png")
+    lines.append("- plot_manual_misclassified_hits_censored_by_probe.png")
+    lines.append("- plot_manual_misclassified_hits_censored_global.png")
+    lines.append("- plot_manual_misclassified_passes_uncensored_by_probe.png")
+    lines.append("- plot_manual_misclassified_passes_uncensored_global.png")
 
     (output_dir / "comparison_summary.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -767,6 +1073,7 @@ def clean_generated_outputs(output_dir: Path) -> None:
 
 def run_analysis(
     report_dir: Path,
+    review_dir: Path,
     output_dir: Path,
     models_filter: Optional[List[str]],
 ) -> None:
@@ -776,11 +1083,16 @@ def run_analysis(
     attempts, report_eval, digest_group_rows, digest_probe_rows, run_rows = collect_report_rows(
         report_dir, models_filter=models_filter
     )
+    manual_reviews = collect_manual_review_rows(review_dir)
 
     attempt_completion_by_model, attempt_completion_by_probe, status_distribution = summarize_attempt_statuses(attempts)
     report_eval_summary = summarize_report_eval(report_eval)
     eval_by_model = summarize_eval_by_model(report_eval_summary)
     eval_by_probe = summarize_eval_by_probe(report_eval_summary)
+    manual_misclassification = summarize_manual_misclassification_by_probe(
+        eval_by_probe,
+        manual_reviews,
+    )
     run_time_by_probe, run_time_by_model = summarize_run_times(run_rows)
     overview = create_overview_table(
         attempt_completion_by_model,
@@ -823,6 +1135,10 @@ def run_analysis(
         run_time_by_model.to_csv(output_dir / "summary_runtime_by_model.csv", index=False)
     if not overview.empty:
         overview.to_csv(output_dir / "summary_model_overview.csv", index=False)
+    if not manual_misclassification.empty:
+        manual_misclassification.to_csv(
+            output_dir / "summary_manual_misclassification_by_probe.csv", index=False
+        )
 
     save_plots(
         eval_by_model,
@@ -832,6 +1148,7 @@ def run_analysis(
         digest_probe_rows,
         run_time_by_probe,
         run_time_by_model,
+        manual_misclassification,
         output_dir,
     )
 
@@ -841,10 +1158,18 @@ def run_analysis(
         | set(digest_group_rows.get("model", pd.Series(dtype=str)).dropna().tolist())
         | set(run_rows.get("model", pd.Series(dtype=str)).dropna().tolist())
     )
-    write_markdown_summary(output_dir, models_found, eval_by_model, overview, run_time_by_model)
+    write_markdown_summary(
+        output_dir,
+        models_found,
+        eval_by_model,
+        overview,
+        run_time_by_model,
+        manual_misclassification,
+    )
 
     print(f"Analysis completed. Output folder: {output_dir}")
     print(f"Models compared: {models_found}")
+    print(f"Manual review rows loaded: {len(manual_reviews)}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -864,6 +1189,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory where CSVs, charts and markdown summary will be written",
     )
     parser.add_argument(
+        "--review-dir",
+        type=Path,
+        default=Path("garakManualReviews"),
+        help="Directory containing *_misclassified_reviews.jsonl manual review files",
+    )
+    parser.add_argument(
         "--models",
         nargs="*",
         default=None,
@@ -878,6 +1209,7 @@ def main() -> None:
 
     run_analysis(
         report_dir=args.report_dir,
+        review_dir=args.review_dir,
         output_dir=args.output_dir,
         models_filter=args.models,
     )
