@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 PROBE_PREFIX_RE = re.compile(
-    r"_(?P<probe>(?:atkgen|continuation|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts)(?:\..+)?)$"
+    r"_(?P<probe>(?:atkgen|continuation|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts|tap|topic|exploitation|ansiescape)(?:\..+)?)$"
 )
 
 
@@ -934,6 +934,7 @@ def build_html(title: str, payload: str) -> str:
     let activeView = "all";
     const reviewStorageKey = "garakClassificationReviews.v1";
     let reviews = loadReviews();
+    const reviewFileHandles = new Map();
 
     function safe(v) {{
       return (v ?? "").toString();
@@ -1066,6 +1067,62 @@ def build_html(title: str, payload: str) -> str:
       }}
     }}
 
+    function reviewFileTypes() {{
+      return [{{
+        description: "JSONL review file",
+        accept: {{
+          "application/json": [".jsonl"],
+          "text/plain": [".jsonl"],
+        }},
+      }}];
+    }}
+
+    function parseReviewJsonl(text) {{
+      const rows = {{}};
+      text.split(/\r?\n/).forEach(line => {{
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {{
+          const row = JSON.parse(trimmed);
+          if (row && row.review_key) {{
+            rows[row.review_key] = row;
+          }}
+        }} catch (err) {{
+          console.warn("Skipping invalid review row", err);
+        }}
+      }});
+      return rows;
+    }}
+
+    async function readReviewsFromHandle(handle) {{
+      const file = await handle.getFile();
+      const text = await file.text();
+      return parseReviewJsonl(text);
+    }}
+
+    async function chooseReviewFileHandle() {{
+      const fileName = currentReviewFileName();
+      const existingHandle = reviewFileHandles.get(fileName);
+      if (existingHandle) return existingHandle;
+      if (!window.showSaveFilePicker) return null;
+      const handle = await window.showSaveFilePicker({{
+        suggestedName: fileName,
+        types: reviewFileTypes(),
+        excludeAcceptAllOption: false,
+      }});
+      reviewFileHandles.set(fileName, handle);
+      return handle;
+    }}
+
+    async function writeReviewsToHandle(handle, rows) {{
+      const writable = await handle.createWritable();
+      try {{
+        await writable.write(reviewsAsJsonl(rows));
+      }} finally {{
+        await writable.close();
+      }}
+    }}
+
     function reviewKey(a) {{
       return [
         selectedModel(),
@@ -1131,18 +1188,46 @@ def build_html(title: str, payload: str) -> str:
     }}
 
     function reviewsAsJsonl(rows = reviewsForCurrentProbe()) {{
-      rows = rows.slice().sort((a, b) => safe(a.reviewed_at).localeCompare(safe(b.reviewed_at)));
-      return rows.map(row => JSON.stringify(row)).join("\\n") + (rows.length ? "\\n" : "");
+      const items = Array.isArray(rows) ? rows.slice() : Object.values(rows || {{}});
+      items.sort((a, b) => safe(a.reviewed_at).localeCompare(safe(b.reviewed_at)));
+      return items.map(row => JSON.stringify(row)).join("\n") + (items.length ? "\n" : "");
     }}
 
-    function saveMisclassifiedReview() {{
+    function updateMisclassifiedButton(existing) {{
+      markWrong.disabled = Boolean(existing);
+      markWrong.textContent = existing ? "Misclassified" : "Mark misclassified";
+      markWrong.title = existing
+        ? "This conversation is already marked as misclassified."
+        : "Mark this conversation as misclassified.";
+    }}
+
+    async function saveMisclassifiedReview() {{
       if (!filtered.length) return;
       const a = filtered[selectedIndex];
       const record = buildMisclassifiedReviewRecord(a);
       reviews[record.review_key] = record;
       persistReviewsLocal();
-      updateReviewStatus();
-      exportReviewFile();
+      try {{
+        const handle = await chooseReviewFileHandle();
+        if (!handle) {{
+          exportReviewFile();
+          updateReviewStatus();
+          goToNextConversation();
+          return;
+        }}
+
+        const existingRows = await readReviewsFromHandle(handle);
+        existingRows[record.review_key] = record;
+        reviews[record.review_key] = record;
+        persistReviewsLocal();
+        await writeReviewsToHandle(handle, existingRows);
+        updateReviewStatus();
+        goToNextConversation();
+      }} catch (err) {{
+        if (err?.name === "AbortError") return;
+        console.warn("Could not save misclassified review", err);
+        updateReviewStatus();
+      }}
     }}
 
     function exportReviewFile() {{
@@ -1158,14 +1243,24 @@ def build_html(title: str, payload: str) -> str:
       URL.revokeObjectURL(url);
     }}
 
+    function goToNextConversation() {{
+      if (selectedIndex < filtered.length - 1) {{
+        selectedIndex += 1;
+        attemptSel.value = String(selectedIndex);
+        renderAttempt();
+      }}
+    }}
+
     function updateReviewStatus() {{
       if (!filtered.length) {{
         reviewStatus.textContent = "";
+        updateMisclassifiedButton(null);
         return;
       }}
 
       const a = filtered[selectedIndex];
       const existing = reviews[reviewKey(a)];
+      updateMisclassifiedButton(existing);
       const count = reviewsForCurrentProbe().length;
       const existingText = existing
         ? `Current conversation marked as misclassified at ${{existing.reviewed_at}}.`
@@ -1514,11 +1609,7 @@ def build_html(title: str, payload: str) -> str:
     }});
 
     nextBtn.addEventListener("click", () => {{
-      if (selectedIndex < filtered.length - 1) {{
-        selectedIndex += 1;
-        attemptSel.value = String(selectedIndex);
-        renderAttempt();
-      }}
+      goToNextConversation();
     }});
 
     reset.addEventListener("click", () => {{

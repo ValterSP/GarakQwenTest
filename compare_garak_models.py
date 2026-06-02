@@ -13,7 +13,7 @@ import seaborn as sns
 
 
 PROBE_PREFIX_RE = re.compile(
-    r"_(?P<probe>(?:atkgen|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts)(?:\..+)?)$"
+    r"_(?P<probe>(?:atkgen|dan|goodside|grandma|lmrc|malwaregen|misleading|realtoxicityprompts|tap|topic|exploitation|ansiescape)(?:\..+)?)$"
 )
 
 
