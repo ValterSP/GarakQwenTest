@@ -420,7 +420,44 @@ def collect_reports(
     return dataset, report_count, attempt_count, conversation_count_total
 
 
-def build_html(title: str, payload: str) -> str:
+def safe_file_part(value: Any) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("_")
+    return cleaned or "unknown"
+
+
+def review_file_name(model: str, probe: str) -> str:
+    return f"{safe_file_part(model)}_{safe_file_part(probe)}_misclassified_reviews.jsonl"
+
+
+def ensure_review_files(dataset: Dict[str, Any], review_dir: Path) -> int:
+    review_dir.mkdir(parents=True, exist_ok=True)
+    created_count = 0
+    for model, probes in dataset.items():
+        for probe in probes:
+            review_path = review_dir / review_file_name(model, probe)
+            if not review_path.exists():
+                review_path.touch()
+                created_count += 1
+    return created_count
+
+
+def collect_manual_reviews(review_dir: Path) -> Tuple[Dict[str, Dict[str, Any]], int]:
+    reviews: Dict[str, Dict[str, Any]] = {}
+    row_count = 0
+    if not review_dir.exists():
+        return reviews, row_count
+
+    for review_path in sorted(review_dir.glob("*_misclassified_reviews.jsonl")):
+        for _, row in read_jsonl(review_path):
+            review_key = row.get("review_key")
+            if not review_key:
+                continue
+            reviews[str(review_key)] = row
+            row_count += 1
+    return reviews, row_count
+
+
+def build_html(title: str, payload: str, review_payload: str) -> str:
     escaped_title = escape(title)
     return f"""<!doctype html>
 <html lang="en">
@@ -914,6 +951,7 @@ def build_html(title: str, payload: str) -> str:
 
   <script>
     const dataset = {payload};
+    const initialReviews = {review_payload};
 
     const modelSel = document.getElementById("model");
     const probeSel = document.getElementById("probe");
@@ -948,8 +986,7 @@ def build_html(title: str, payload: str) -> str:
     let filtered = [];
     let selectedIndex = 0;
     let activeView = "all";
-    const reviewStorageKey = "garakClassificationReviews.v1";
-    let reviews = loadReviews();
+    let reviews = {{ ...initialReviews }};
     let reviewDirectoryHandle = null;
     const reviewFileHandles = new Map();
     const reviewFileHandleSources = new Map();
@@ -1069,23 +1106,6 @@ def build_html(title: str, payload: str) -> str:
       const scores = a.detector_scores || [];
       if (!scores.length) return "none";
       return scores.map(d => `${{d.name}}=${{formatScore(d.score)}}`).join(" | ");
-    }}
-
-    function loadReviews() {{
-      try {{
-        return JSON.parse(localStorage.getItem(reviewStorageKey) || "{{}}");
-      }} catch (err) {{
-        console.warn("Could not load saved reviews", err);
-        return {{}};
-      }}
-    }}
-
-    function persistReviewsLocal() {{
-      try {{
-        localStorage.setItem(reviewStorageKey, JSON.stringify(reviews));
-      }} catch (err) {{
-        console.warn("Could not persist reviews locally", err);
-      }}
     }}
 
     function parseReviewJsonl(text) {{
@@ -1272,14 +1292,6 @@ def build_html(title: str, payload: str) -> str:
       Object.values(rows || {{}}).forEach(row => {{
         if (row && row.review_key) reviews[row.review_key] = row;
       }});
-      persistReviewsLocal();
-    }}
-
-    function mergeReviewRows(rows) {{
-      Object.values(rows || {{}}).forEach(row => {{
-        if (row && row.review_key) reviews[row.review_key] = row;
-      }});
-      persistReviewsLocal();
     }}
 
     async function syncReviewsForCurrentProbe({{ promptUser = false }} = {{}}) {{
@@ -1785,6 +1797,12 @@ def main() -> None:
         default=Path("report_chat_browser.html"),
         help="Output HTML path",
     )
+    parser.add_argument(
+        "--review-dir",
+        type=Path,
+        default=Path("garakManualReviews"),
+        help="Directory with *_misclassified_reviews.jsonl files",
+    )
     args = parser.parse_args()
 
     if not args.report_dir.exists():
@@ -1794,7 +1812,13 @@ def main() -> None:
 
     hitlogs, hitlog_file_count, hit_count = collect_hitlogs(args.hitlog_dir)
     dataset, report_count, attempt_count, row_count = collect_reports(args.report_dir, hitlogs=hitlogs)
-    html = build_html("Garak Chat Browser", json_for_script(dataset))
+    created_review_files = ensure_review_files(dataset, args.review_dir)
+    manual_reviews, manual_review_count = collect_manual_reviews(args.review_dir)
+    html = build_html(
+        "Garak Chat Browser",
+        json_for_script(dataset),
+        json_for_script(manual_reviews),
+    )
     args.output.write_text(html, encoding="utf-8")
 
     print(f"HTML generated: {args.output}")
@@ -1803,6 +1827,8 @@ def main() -> None:
     print(f"Hitlog rows loaded: {hit_count}")
     print(f"Unique attempts loaded: {attempt_count}")
     print(f"Conversation rows loaded: {row_count}")
+    print(f"Manual review files created: {created_review_files}")
+    print(f"Manual review rows embedded: {manual_review_count}")
 
 
 if __name__ == "__main__":
