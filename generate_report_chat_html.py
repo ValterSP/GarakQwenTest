@@ -1034,6 +1034,32 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       return activeView === "hitlog" ? "hitlog hits" : "conversations";
     }}
 
+    function readViewState() {{
+      if (!window.location.hash.startsWith("#state=")) return null;
+      try {{
+        return JSON.parse(decodeURIComponent(window.location.hash.slice(7)));
+      }} catch (err) {{
+        console.warn("Could not read view state", err);
+        return null;
+      }}
+    }}
+
+    function saveViewState() {{
+      const state = {{
+        model: selectedModel(),
+        probe: selectedProbe(),
+        view: activeView,
+        q: q.value,
+        result: result.value,
+        sort: sort.value,
+        index: selectedIndex,
+      }};
+      const nextHash = `#state=${{encodeURIComponent(JSON.stringify(state))}}`;
+      if (window.location.hash !== nextHash) {{
+        history.replaceState(null, "", nextHash);
+      }}
+    }}
+
     function formatScore(score) {{
       if (typeof score === "number" && Number.isFinite(score)) {{
         if (score === 0 || score === 1) return String(score);
@@ -1195,6 +1221,47 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       }}
     }}
 
+    function apiUrl(path, params = {{}}) {{
+      const url = new URL(path, window.location.href);
+      Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+      return url.toString();
+    }}
+
+    async function loadReviewsFromApi() {{
+      if (!window.location.protocol.startsWith("http")) return null;
+      const response = await fetch(apiUrl("/api/reviews", {{
+        model: selectedModel(),
+        probe: selectedProbe(),
+      }}), {{
+        headers: {{ "Accept": "application/json" }},
+      }});
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`Review API returned ${{response.status}}`);
+      return await response.json();
+    }}
+
+    async function saveReviewToApi(record) {{
+      if (!window.location.protocol.startsWith("http")) return null;
+      const response = await fetch(apiUrl("/api/reviews"), {{
+        method: "POST",
+        headers: {{
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        }},
+        body: JSON.stringify(record),
+      }});
+      if (response.status === 404) return null;
+      if (!response.ok) {{
+        let message = `Review API returned ${{response.status}}`;
+        try {{
+          const body = await response.json();
+          message = body.error || message;
+        }} catch (err) {{}}
+        throw new Error(message);
+      }}
+      return await response.json();
+    }}
+
     function reviewKey(a) {{
       return [
         selectedModel(),
@@ -1297,10 +1364,21 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     async function syncReviewsForCurrentProbe({{ promptUser = false }} = {{}}) {{
       const fileName = currentReviewFileName();
       if (!fileName || syncingReviewFiles.has(fileName)) return false;
-      if (!promptUser && (!reviewDirectoryHandle || syncedReviewFiles.has(fileName))) return false;
+      if (!promptUser && syncedReviewFiles.has(fileName)) return false;
 
       syncingReviewFiles.add(fileName);
       try {{
+        const apiResult = await loadReviewsFromApi();
+        if (apiResult) {{
+          replaceReviewsForCurrentProbe(apiResult.rows || {{}});
+          syncedReviewFiles.add(fileName);
+          lastReviewSaveStatus = `Loaded ${{apiResult.count || 0}} review(s) from garakManualReviews/${{fileName}}.`;
+          updateReviewStatus();
+          return true;
+        }}
+
+        if (!promptUser && !reviewDirectoryHandle) return false;
+
         const selection = await chooseReviewFileHandle({{
           create: false,
           promptUser,
@@ -1344,9 +1422,22 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       const record = buildMisclassifiedReviewRecord(a);
       lastReviewSaveStatus = "";
       try {{
+        const apiResult = await saveReviewToApi(record);
+        if (apiResult) {{
+          replaceReviewsForCurrentProbe(apiResult.rows || {{}});
+          syncedReviewFiles.add(currentReviewFileName());
+          lastReviewSaveStatus = apiResult.already_exists
+            ? `Already marked in garakManualReviews/${{currentReviewFileName()}}.`
+            : `Saved JSONL to garakManualReviews/${{currentReviewFileName()}}.`;
+          updateReviewStatus();
+          if (!apiResult.already_exists) goToNextConversation();
+          return;
+        }}
+
         const selection = await chooseReviewFileHandle({{ create: true, promptUser: true }});
         if (!selection) {{
-          lastReviewSaveStatus = "Could not write directly. Open this page in Chrome or Edge and choose the garakManualReviews folder when prompted.";
+          lastReviewSaveStatus = "Could not write directly. Open http://127.0.0.1:8765/ while review_server.py is running.";
+          alert(lastReviewSaveStatus);
           updateReviewStatus();
           return;
         }}
@@ -1371,6 +1462,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       }} catch (err) {{
         if (err?.name === "AbortError") return;
         lastReviewSaveStatus = `Could not save review: ${{err?.message || err}}`;
+        alert(lastReviewSaveStatus);
         console.warn("Could not save misclassified review", err);
         updateReviewStatus();
       }}
@@ -1488,6 +1580,9 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     function renderDashboard() {{
       const probe = dashboardProbe.value || allProbeNames()[0] || "";
       if (probe && dashboardProbe.value !== probe) dashboardProbe.value = probe;
+      if (probe && probeSel.value !== probe && dataset?.[selectedModel()]?.[probe]) {{
+        probeSel.value = probe;
+      }}
 
       const totals = allModels().map(model => ({{ model, ...modelTotals(model) }}));
       dashboardTotals.innerHTML = totals.map(row => `
@@ -1562,6 +1657,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       count.textContent = probe
         ? `Dashboard comparing ${{rows.length}} model(s) for probe "${{probe}}"; ${{allProbeNames().length}} total probe groups available`
         : "Dashboard has no probes to compare";
+      saveViewState();
     }}
 
     function applyFilters() {{
@@ -1690,6 +1786,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       nextBtn.disabled = selectedIndex >= filtered.length - 1;
       updateReviewStatus();
       syncReviewsForCurrentProbe({{ promptUser: false }});
+      saveViewState();
     }}
 
     modelSel.addEventListener("change", () => {{
@@ -1703,26 +1800,63 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       applyFilters();
     }});
 
-    function setActiveView(view) {{
-      activeView = view;
+    function updateActiveViewChrome() {{
       tabAll.classList.toggle("active", activeView === "all");
       tabHitlog.classList.toggle("active", activeView === "hitlog");
       tabDashboard.classList.toggle("active", activeView === "dashboard");
-      selectedIndex = 0;
       const isDashboard = activeView === "dashboard";
       dashboard.classList.toggle("hidden", !isDashboard);
       viewer.classList.toggle("hidden", isDashboard);
       empty.classList.toggle("hidden", isDashboard);
+    }}
+
+    function setActiveView(view) {{
+      activeView = view;
+      selectedIndex = 0;
+      updateActiveViewChrome();
       applyFilters();
     }}
 
-    tabAll.addEventListener("click", () => setActiveView("all"));
-    tabHitlog.addEventListener("click", () => setActiveView("hitlog"));
-    tabDashboard.addEventListener("click", () => setActiveView("dashboard"));
+    function restoreViewState() {{
+      const state = readViewState();
+      if (!state) return false;
+      if (state.model && dataset[state.model]) {{
+        modelSel.value = state.model;
+      }}
+      populateProbes();
+      if (state.probe && dataset?.[selectedModel()]?.[state.probe]) {{
+        probeSel.value = state.probe;
+      }}
+      if (state.q !== undefined) q.value = safe(state.q);
+      if (state.result !== undefined) result.value = safe(state.result);
+      if (state.sort !== undefined) sort.value = safe(state.sort) || "new";
+      if (["all", "hitlog", "dashboard"].includes(state.view)) activeView = state.view;
+      selectedIndex = Number(state.index) || 0;
+      return true;
+    }}
+
+    tabAll.addEventListener("click", (event) => {{
+      event.preventDefault();
+      setActiveView("all");
+    }});
+    tabHitlog.addEventListener("click", (event) => {{
+      event.preventDefault();
+      setActiveView("hitlog");
+    }});
+    tabDashboard.addEventListener("click", (event) => {{
+      event.preventDefault();
+      setActiveView("dashboard");
+    }});
     dashboardProbe.addEventListener("change", () => renderDashboard());
     dashboardSort.addEventListener("change", () => renderDashboard());
-    markWrong.addEventListener("click", () => saveMisclassifiedReview());
-    syncReviews.addEventListener("click", () => syncReviewsForCurrentProbe({{ promptUser: true }}));
+    markWrong.addEventListener("click", (event) => {{
+      event.preventDefault();
+      saveMisclassifiedReview();
+    }});
+    syncReviews.addEventListener("click", (event) => {{
+      event.preventDefault();
+      syncReviewsForCurrentProbe({{ promptUser: true }});
+    }});
 
     [q, result, sort].forEach(el =>
       el.addEventListener("input", () => {{
@@ -1736,7 +1870,8 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       renderAttempt();
     }});
 
-    prevBtn.addEventListener("click", () => {{
+    prevBtn.addEventListener("click", (event) => {{
+      event.preventDefault();
       if (selectedIndex > 0) {{
         selectedIndex -= 1;
         attemptSel.value = String(selectedIndex);
@@ -1744,11 +1879,13 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       }}
     }});
 
-    nextBtn.addEventListener("click", () => {{
+    nextBtn.addEventListener("click", (event) => {{
+      event.preventDefault();
       goToNextConversation();
     }});
 
-    reset.addEventListener("click", () => {{
+    reset.addEventListener("click", (event) => {{
+      event.preventDefault();
       q.value = "";
       result.value = "";
       sort.value = "new";
@@ -1757,8 +1894,9 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     }});
 
     populateModels();
-    populateProbes();
+    if (!restoreViewState()) populateProbes();
     populateDashboardProbes();
+    updateActiveViewChrome();
     applyFilters();
   </script>
 </body>
