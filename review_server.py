@@ -62,6 +62,13 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
             return
         self.send_json({"error": "Not found"}, status=404)
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/reviews":
+            self.handle_delete_review()
+            return
+        self.send_json({"error": "Not found"}, status=404)
+
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
 
@@ -106,6 +113,38 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
                 "count": len(rows),
                 "file": str(path),
                 "already_exists": already_exists,
+            }
+        )
+
+    def handle_delete_review(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            record = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json({"error": "Invalid JSON body"}, status=400)
+            return
+
+        required = ["review_key", "model", "probe"]
+        missing = [key for key in required if not record.get(key)]
+        if missing:
+            self.send_json({"error": f"Missing field(s): {', '.join(missing)}"}, status=400)
+            return
+
+        path = self.server.review_dir / review_file_name(record["model"], record["probe"])
+        rows = read_jsonl(path)
+        removed = rows.pop(str(record["review_key"]), None) is not None
+        if removed:
+            write_jsonl(path, rows)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+
+        self.send_json(
+            {
+                "rows": rows,
+                "count": len(rows),
+                "file": str(path),
+                "removed": removed,
             }
         )
 

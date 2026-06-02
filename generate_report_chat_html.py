@@ -622,6 +622,16 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       background: #8f1f16;
     }}
 
+    .button-danger.is-remove {{
+      background: #fff;
+      border-color: #b42318;
+      color: #8f1f16;
+    }}
+
+    .button-danger.is-remove:hover {{
+      background: #fff1f0;
+    }}
+
     .attempt {{
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1262,6 +1272,28 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       return await response.json();
     }}
 
+    async function removeReviewFromApi(record) {{
+      if (!window.location.protocol.startsWith("http")) return null;
+      const response = await fetch(apiUrl("/api/reviews"), {{
+        method: "DELETE",
+        headers: {{
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        }},
+        body: JSON.stringify(record),
+      }});
+      if (response.status === 404) return null;
+      if (!response.ok) {{
+        let message = `Review API returned ${{response.status}}`;
+        try {{
+          const body = await response.json();
+          message = body.error || message;
+        }} catch (err) {{}}
+        throw new Error(message);
+      }}
+      return await response.json();
+    }}
+
     function reviewKey(a) {{
       return [
         selectedModel(),
@@ -1409,11 +1441,67 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     }}
 
     function updateMisclassifiedButton(existing) {{
-      markWrong.disabled = Boolean(existing);
-      markWrong.textContent = existing ? "Misclassified" : "Mark misclassified";
+      markWrong.disabled = false;
+      markWrong.classList.toggle("is-remove", Boolean(existing));
+      markWrong.textContent = existing ? "Remove misclassified" : "Mark misclassified";
       markWrong.title = existing
-        ? "This conversation is already marked as misclassified."
+        ? "Remove this conversation from the manual misclassification file."
         : "Mark this conversation as misclassified.";
+    }}
+
+    async function removeMisclassifiedReview() {{
+      if (!filtered.length) return;
+      const a = filtered[selectedIndex];
+      const record = buildMisclassifiedReviewRecord(a);
+      lastReviewSaveStatus = "";
+      try {{
+        const apiResult = await removeReviewFromApi(record);
+        if (apiResult) {{
+          replaceReviewsForCurrentProbe(apiResult.rows || {{}});
+          syncedReviewFiles.add(currentReviewFileName());
+          lastReviewSaveStatus = apiResult.removed
+            ? `Removed from garakManualReviews/${{currentReviewFileName()}}.`
+            : `No saved misclassification found in garakManualReviews/${{currentReviewFileName()}}.`;
+          updateReviewStatus();
+          return;
+        }}
+
+        const selection = await chooseReviewFileHandle({{ create: true, promptUser: true }});
+        if (!selection) {{
+          lastReviewSaveStatus = "Could not write directly. Open http://127.0.0.1:8765/ while review_server.py is running.";
+          alert(lastReviewSaveStatus);
+          updateReviewStatus();
+          return;
+        }}
+
+        const handle = selection.handle;
+        const existingRows = await readReviewsFromHandle(handle);
+        const removed = Boolean(existingRows[record.review_key]);
+        delete existingRows[record.review_key];
+        await writeReviewsToHandle(handle, existingRows);
+        replaceReviewsForCurrentProbe(existingRows);
+        syncedReviewFiles.add(currentReviewFileName());
+        lastReviewSaveStatus = removed
+          ? `Removed from ${{selection.source}}/${{currentReviewFileName()}}.`
+          : `No saved misclassification found in ${{selection.source}}/${{currentReviewFileName()}}.`;
+        updateReviewStatus();
+      }} catch (err) {{
+        if (err?.name === "AbortError") return;
+        lastReviewSaveStatus = `Could not remove review: ${{err?.message || err}}`;
+        alert(lastReviewSaveStatus);
+        console.warn("Could not remove misclassified review", err);
+        updateReviewStatus();
+      }}
+    }}
+
+    async function toggleMisclassifiedReview() {{
+      if (!filtered.length) return;
+      const a = filtered[selectedIndex];
+      if (reviews[reviewKey(a)]) {{
+        await removeMisclassifiedReview();
+      }} else {{
+        await saveMisclassifiedReview();
+      }}
     }}
 
     async function saveMisclassifiedReview() {{
@@ -1851,7 +1939,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     dashboardSort.addEventListener("change", () => renderDashboard());
     markWrong.addEventListener("click", (event) => {{
       event.preventDefault();
-      saveMisclassifiedReview();
+      toggleMisclassifiedReview();
     }});
     syncReviews.addEventListener("click", (event) => {{
       event.preventDefault();
