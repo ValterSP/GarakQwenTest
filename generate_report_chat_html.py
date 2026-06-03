@@ -918,6 +918,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       <div class="tabs">
         <button id="tabAll" class="active" type="button">All conversations</button>
         <button id="tabHitlog" type="button">Hitlog hits</button>
+        <button id="tabPasslog" type="button">Pass logs</button>
         <button id="tabDashboard" type="button">Dashboard</button>
       </div>
       <div class="count" id="count"></div>
@@ -972,6 +973,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     const reset = document.getElementById("reset");
     const tabAll = document.getElementById("tabAll");
     const tabHitlog = document.getElementById("tabHitlog");
+    const tabPasslog = document.getElementById("tabPasslog");
     const tabDashboard = document.getElementById("tabDashboard");
     const reviewStatus = document.getElementById("reviewStatus");
     const markWrong = document.getElementById("markWrong");
@@ -1037,11 +1039,15 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       const model = selectedModel();
       const probe = selectedProbe();
       const probeData = dataset?.[model]?.[probe];
-      return activeView === "hitlog" ? (probeData?.hitlog_hits || []) : (probeData?.attempts || []);
+      if (activeView === "hitlog") return probeData?.hitlog_hits || [];
+      if (activeView === "passlog") return (probeData?.attempts || []).filter(a => !Boolean(a.is_hit));
+      return probeData?.attempts || [];
     }}
 
     function currentViewLabel() {{
-      return activeView === "hitlog" ? "hitlog hits" : "conversations";
+      if (activeView === "hitlog") return "hitlog hits";
+      if (activeView === "passlog") return "pass logs";
+      return "conversations";
     }}
 
     function readViewState() {{
@@ -1755,7 +1761,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       }}
 
       const query = q.value.trim().toLowerCase();
-      const selectedResult = result.value;
+      const selectedResult = activeView === "all" ? result.value : "";
       const reverse = sort.value === "new";
 
       let rows = rowsForModelProbe().map((a, idx) => ({{ ...a, __idx: idx }}));
@@ -1891,6 +1897,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     function updateActiveViewChrome() {{
       tabAll.classList.toggle("active", activeView === "all");
       tabHitlog.classList.toggle("active", activeView === "hitlog");
+      tabPasslog.classList.toggle("active", activeView === "passlog");
       tabDashboard.classList.toggle("active", activeView === "dashboard");
       const isDashboard = activeView === "dashboard";
       dashboard.classList.toggle("hidden", !isDashboard);
@@ -1918,7 +1925,7 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
       if (state.q !== undefined) q.value = safe(state.q);
       if (state.result !== undefined) result.value = safe(state.result);
       if (state.sort !== undefined) sort.value = safe(state.sort) || "new";
-      if (["all", "hitlog", "dashboard"].includes(state.view)) activeView = state.view;
+      if (["all", "hitlog", "passlog", "dashboard"].includes(state.view)) activeView = state.view;
       selectedIndex = Number(state.index) || 0;
       return true;
     }}
@@ -1930,6 +1937,10 @@ def build_html(title: str, payload: str, review_payload: str) -> str:
     tabHitlog.addEventListener("click", (event) => {{
       event.preventDefault();
       setActiveView("hitlog");
+    }});
+    tabPasslog.addEventListener("click", (event) => {{
+      event.preventDefault();
+      setActiveView("passlog");
     }});
     tabDashboard.addEventListener("click", (event) => {{
       event.preventDefault();
