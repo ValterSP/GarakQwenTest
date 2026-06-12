@@ -85,6 +85,57 @@ def probe_label(probe: str) -> str:
     return f"{group_labels.get(group, group)}: {readable_name}"
 
 
+def outcome_label(outcome: str) -> str:
+    labels = {
+        "hit": "positive",
+        "pass": "negative",
+    }
+    return labels.get(str(outcome), str(outcome))
+
+
+def outcome_display(outcome: str) -> str:
+    labels = {
+        "hit": "Positive",
+        "pass": "Negative",
+    }
+    return labels.get(str(outcome), str(outcome).title())
+
+
+RAW_ATTEMPTS_FILE = "dados_brutos_tentativas.csv"
+RAW_EVAL_FILE = "dados_brutos_avaliacoes.csv"
+RAW_RUNS_FILE = "dados_brutos_execucoes.csv"
+
+SUMMARY_ATTEMPTS_BY_MODEL_FILE = "resumo_conclusao_tentativas_por_modelo.csv"
+SUMMARY_ATTEMPTS_BY_PROBE_FILE = "resumo_conclusao_tentativas_por_probe.csv"
+SUMMARY_STATUS_COUNTS_FILE = "resumo_contagem_estados.csv"
+SUMMARY_EVAL_DETECTOR_FILE = "resumo_avaliacoes_por_detector.csv"
+SUMMARY_EVAL_BY_MODEL_FILE = "resumo_avaliacoes_por_modelo.csv"
+SUMMARY_EVAL_BY_PROBE_FILE = "resumo_avaliacoes_por_probe.csv"
+SUMMARY_DIGEST_GROUP_FILE = "resumo_digest_por_grupo.csv"
+SUMMARY_DIGEST_PROBE_FILE = "resumo_digest_por_probe.csv"
+SUMMARY_RUNTIME_BY_PROBE_FILE = "resumo_tempo_execucao_por_probe.csv"
+SUMMARY_RUNTIME_BY_MODEL_FILE = "resumo_tempo_execucao_por_modelo.csv"
+SUMMARY_MODEL_OVERVIEW_FILE = "resumo_geral_modelos.csv"
+SUMMARY_MANUAL_MISCLASSIFICATION_FILE = "resumo_misclassificacao_manual_por_probe.csv"
+
+PLOT_POSITIVE_BY_MODEL_FILE = "grafico_taxa_positiva_por_modelo.png"
+PLOT_NEGATIVE_BY_MODEL_FILE = "grafico_taxa_negativa_por_modelo.png"
+PLOT_POSITIVE_BY_PROBE_FILE = "mapa_calor_taxa_positiva_por_probe.png"
+PLOT_NEGATIVE_BY_PROBE_FILE = "mapa_calor_taxa_negativa_por_probe.png"
+PLOT_POSITIVE_DELTA_FILE = "grafico_diferenca_taxa_positiva_por_probe.png"
+PLOT_DETECTOR_POSITIVE_FILE = "mapa_calor_taxa_positiva_por_detector.png"
+PLOT_DIGEST_GROUP_FILE = "grafico_digest_por_grupo.png"
+PLOT_DIGEST_PROBE_FILE = "mapa_calor_digest_por_probe.png"
+PLOT_RUNTIME_TOTAL_FILE = "grafico_tempo_total_execucao_por_modelo.png"
+PLOT_RUNTIME_BY_PROBE_FILE = "grafico_tempo_execucao_por_probe_e_modelo.png"
+PLOT_MANUAL_HITS_CENSORED_PROBE_FILE = "grafico_misclassificacao_manual_deteccoes_positivas_modelo_censurado_por_probe.png"
+PLOT_MANUAL_HITS_CENSORED_GLOBAL_FILE = "grafico_misclassificacao_manual_deteccoes_positivas_modelo_censurado_global.png"
+PLOT_MANUAL_PASSES_UNCENSORED_PROBE_FILE = "grafico_misclassificacao_manual_passes_modelo_descensurado_por_probe.png"
+PLOT_MANUAL_PASSES_UNCENSORED_GLOBAL_FILE = "grafico_misclassificacao_manual_passes_modelo_descensurado_global.png"
+
+SUMMARY_OUTPUT_FILE = "resumo_comparacao.md"
+
+
 def add_percent_labels(ax) -> None:
     for container in ax.containers:
         ax.bar_label(container, fmt="%.1f%%", padding=3, fontsize=8)
@@ -635,7 +686,7 @@ def save_manual_misclassification_plot(
     plt.xlabel("Manually marked misclassified (%)")
     plt.ylabel("Probe")
     plt.xlim(0, 100)
-    plt.legend(title="Model")
+    plt.legend(title=f"Model - {outcome_display(original_kind)}")
     plt.tight_layout()
     plt.savefig(output_path, dpi=180)
     plt.close()
@@ -667,7 +718,7 @@ def save_manual_misclassification_global_plot(
     add_percent_labels(ax)
     plt.title(title)
     plt.xlabel("Model")
-    plt.ylabel("Manually marked misclassified (%)")
+    plt.ylabel(f"Manually marked misclassified ({outcome_display(original_kind)})")
     plt.ylim(0, 100)
     plt.tight_layout()
     plt.savefig(output_path, dpi=180)
@@ -697,12 +748,12 @@ def save_plots(
         plt.figure(figsize=(9, 4.8))
         ax = sns.barplot(data=plot_data, x="model_label", y="pass_percent", color="#2f7f5f")
         add_percent_labels(ax)
-        plt.title("Garak Safety Pass Rate by Model")
+        plt.title("Positive Rate by Model")
         plt.xlabel("Model")
-        plt.ylabel("Passed evaluations (%)")
+        plt.ylabel("Positive evaluations (%)")
         plt.ylim(0, 100)
         plt.tight_layout()
-        plt.savefig(output_dir / "plot_eval_pass_rate_by_model.png", dpi=180)
+        plt.savefig(output_dir / PLOT_POSITIVE_BY_MODEL_FILE, dpi=180)
         plt.close()
 
         hit_plot_data = eval_by_model.sort_values("hit_percent", ascending=False).copy()
@@ -711,12 +762,12 @@ def save_plots(
         plt.figure(figsize=(9, 4.8))
         ax = sns.barplot(data=hit_plot_data, x="model_label", y="hit_percent", color="#b84a4a")
         add_percent_labels(ax)
-        plt.title("Garak Hit Rate by Model")
+        plt.title("Negative Rate by Model")
         plt.xlabel("Model")
-        plt.ylabel("Failed evaluations / hits (%)")
+        plt.ylabel("Negative evaluations (%)")
         plt.ylim(0, 100)
         plt.tight_layout()
-        plt.savefig(output_dir / "plot_eval_hit_rate_by_model.png", dpi=180)
+        plt.savefig(output_dir / PLOT_NEGATIVE_BY_MODEL_FILE, dpi=180)
         plt.close()
 
     if not eval_by_probe.empty:
@@ -742,13 +793,13 @@ def save_plots(
                 fmt=".1f",
                 vmin=0,
                 vmax=100,
-                cbar_kws={"label": "Passed evaluations (%)"},
+                cbar_kws={"label": "Positive evaluations (%)"},
             )
-            plt.title("Safety Pass Rate by Probe and Model")
+            plt.title("Positive Rate by Probe and Model")
             plt.xlabel("Model")
             plt.ylabel("Probe")
             plt.tight_layout()
-            plt.savefig(output_dir / "plot_eval_pass_rate_by_probe_heatmap.png", dpi=180)
+            plt.savefig(output_dir / PLOT_POSITIVE_BY_PROBE_FILE, dpi=180)
             plt.close()
 
         pivot_hits = all_probes.pivot_table(
@@ -764,13 +815,13 @@ def save_plots(
                 fmt=".1f",
                 vmin=0,
                 vmax=100,
-                cbar_kws={"label": "Failed evaluations / hits (%)"},
+                cbar_kws={"label": "Negative evaluations (%)"},
             )
-            plt.title("Garak Hit Rate by Probe and Model")
+            plt.title("Negative Rate by Probe and Model")
             plt.xlabel("Model")
             plt.ylabel("Probe")
             plt.tight_layout()
-            plt.savefig(output_dir / "plot_eval_hit_rate_by_probe_heatmap.png", dpi=180)
+            plt.savefig(output_dir / PLOT_NEGATIVE_BY_PROBE_FILE, dpi=180)
             plt.close()
 
         raw_pivot = eval_by_probe.pivot_table(index="probe", columns="model", values="pass_percent", aggfunc="mean")
@@ -787,12 +838,12 @@ def save_plots(
             plt.figure(figsize=(10, max(8, len(delta_plot) * 0.34)))
             bars = plt.barh(delta_plot["probe_label"], delta_plot["delta_percent_points"], color=colors)
             plt.axvline(0, color="#333333", linewidth=0.8)
-            plt.title(f"Pass Rate Difference: {model_label(comparison)} vs {model_label(baseline)}")
-            plt.xlabel("Difference in passed evaluations (percentage points)")
+            plt.title(f"Positive Rate Difference: {model_label(comparison)} vs {model_label(baseline)}")
+            plt.xlabel("Difference in positive evaluations (percentage points)")
             plt.ylabel("Probe")
             plt.bar_label(bars, fmt="%.1f pp", padding=3, fontsize=8)
             plt.tight_layout()
-            plt.savefig(output_dir / "plot_eval_pass_rate_probe_delta.png", dpi=180)
+            plt.savefig(output_dir / PLOT_POSITIVE_DELTA_FILE, dpi=180)
             plt.close()
 
     if not report_eval_summary.empty:
@@ -825,13 +876,13 @@ def save_plots(
                 fmt=".1f",
                 vmin=0,
                 vmax=100,
-                cbar_kws={"label": "Passed evaluations (%)"},
+                cbar_kws={"label": "Positive evaluations (%)"},
             )
-            plt.title("Detector Pass Rate for Highest-Sample Evaluations")
+            plt.title("Detector Positive Rate for Highest-Sample Evaluations")
             plt.xlabel("Model")
             plt.ylabel("Probe | Detector")
             plt.tight_layout()
-            plt.savefig(output_dir / "plot_detector_pass_rate_heatmap.png", dpi=180)
+            plt.savefig(output_dir / PLOT_DETECTOR_POSITIVE_FILE, dpi=180)
             plt.close()
 
     if not digest_group_rows.empty:
@@ -844,14 +895,14 @@ def save_plots(
             digest_copy["group_label"] = digest_copy["group"].map(probe_label)
             plt.figure(figsize=(12, 6))
             sns.barplot(data=digest_copy, x="group_label", y="score_percent", hue="model_label")
-            plt.title("Garak Digest Score by Probe Group")
+            plt.title("Digest Score by Probe Group")
             plt.xlabel("Probe group")
             plt.ylabel("Digest score (%)")
             plt.ylim(0, 100)
             plt.xticks(rotation=25, ha="right")
             plt.legend(title="Model")
             plt.tight_layout()
-            plt.savefig(output_dir / "plot_digest_group_score.png", dpi=180)
+            plt.savefig(output_dir / PLOT_DIGEST_GROUP_FILE, dpi=180)
             plt.close()
 
     if not digest_probe_rows.empty:
@@ -873,11 +924,11 @@ def save_plots(
                 vmax=100,
                 cbar_kws={"label": "Digest score (%)"},
             )
-            plt.title("Garak Digest Score by Probe")
+            plt.title("Digest Score by Probe")
             plt.xlabel("Model")
             plt.ylabel("Probe")
             plt.tight_layout()
-            plt.savefig(output_dir / "plot_digest_probe_score_heatmap.png", dpi=180)
+            plt.savefig(output_dir / PLOT_DIGEST_PROBE_FILE, dpi=180)
             plt.close()
 
     if not run_time_by_model.empty:
@@ -886,11 +937,11 @@ def save_plots(
         plt.figure(figsize=(9, 4.8))
         ax = sns.barplot(data=total_time, x="model_label", y="duration_hours", color="#4c6f9f")
         add_value_labels(ax, "%.1f h")
-        plt.title("Total Garak Runtime by Model")
+        plt.title("Total Runtime by Model")
         plt.xlabel("Model")
         plt.ylabel("Total runtime (hours)")
         plt.tight_layout()
-        plt.savefig(output_dir / "plot_runtime_total_by_model.png", dpi=180)
+        plt.savefig(output_dir / PLOT_RUNTIME_TOTAL_FILE, dpi=180)
         plt.close()
 
     if not run_time_by_probe.empty:
@@ -910,7 +961,7 @@ def save_plots(
         plt.ylabel("Probe")
         plt.legend(title="Model")
         plt.tight_layout()
-        plt.savefig(output_dir / "plot_runtime_by_probe_and_model.png", dpi=180)
+        plt.savefig(output_dir / PLOT_RUNTIME_BY_PROBE_FILE, dpi=180)
         plt.close()
 
     if not manual_misclassification.empty:
@@ -918,29 +969,29 @@ def save_plots(
             manual_misclassification,
             target_model_type="censored",
             original_kind="hit",
-            output_path=output_dir / "plot_manual_misclassified_hits_censored_by_probe.png",
-            title="Manual Misclassified Hits by Probe - Censored Model",
+            output_path=output_dir / PLOT_MANUAL_HITS_CENSORED_PROBE_FILE,
+            title="Manual Misclassified Positives by Probe - Censored Model",
         )
         save_manual_misclassification_global_plot(
             manual_misclassification,
             target_model_type="censored",
             original_kind="hit",
-            output_path=output_dir / "plot_manual_misclassified_hits_censored_global.png",
-            title="Global Manual Misclassified Hits - Censored Model",
+            output_path=output_dir / PLOT_MANUAL_HITS_CENSORED_GLOBAL_FILE,
+            title="Global Manual Misclassified Positives - Censored Model",
         )
         save_manual_misclassification_plot(
             manual_misclassification,
             target_model_type="uncensored",
             original_kind="pass",
-            output_path=output_dir / "plot_manual_misclassified_passes_uncensored_by_probe.png",
-            title="Manual Misclassified Passes by Probe - Uncensored Model",
+            output_path=output_dir / PLOT_MANUAL_PASSES_UNCENSORED_PROBE_FILE,
+            title="Manual Misclassified Negatives by Probe - Uncensored Model",
         )
         save_manual_misclassification_global_plot(
             manual_misclassification,
             target_model_type="uncensored",
             original_kind="pass",
-            output_path=output_dir / "plot_manual_misclassified_passes_uncensored_global.png",
-            title="Global Manual Misclassified Passes - Uncensored Model",
+            output_path=output_dir / PLOT_MANUAL_PASSES_UNCENSORED_GLOBAL_FILE,
+            title="Global Manual Misclassified Negatives - Uncensored Model",
         )
 
 
@@ -999,71 +1050,78 @@ def write_markdown_summary(
     manual_misclassification: pd.DataFrame,
 ) -> None:
     lines = []
-    lines.append("# Garak Model Comparison Summary")
+    lines.append("# Resumo de Comparação de Modelos Garak")
     lines.append("")
-    lines.append(f"- Models found: {', '.join(models) if models else 'none'}")
-    lines.append("- Primary source: report JSONL metadata, attempts, evals, digest and completion timestamps")
-    lines.append("- Pass rate is `passed / total`; hit rate is `(total - passed) / total` from eval rows.")
-    lines.append("- Attempt status is only kept as run completion metadata, not as hit rate.")
-    lines.append("- Manual misclassification charts use saved `garakManualReviews` rows as the numerator.")
+    lines.append(f"- Modelos encontrados: {', '.join(models) if models else 'nenhum'}")
+    lines.append("- Fonte principal: metadados JSONL dos relatórios, tentativas, avaliações, digest e tempos de conclusão")
+    lines.append("- A taxa positiva corresponde a hit: `passed / total`; a taxa negativa corresponde a pass: `(total - passed) / total`.")
+    lines.append("- O estado das tentativas é guardado apenas como metadados de conclusão da execução, não como taxa positiva/negativa.")
+    lines.append("- Os gráficos de misclassificação manual usam as linhas guardadas em `garakManualReviews` como numerador.")
     lines.append("")
 
     if not eval_by_model.empty:
-        lines.append("## Eval Pass Stats")
+        lines.append("## Estatísticas de Taxa Positiva")
         lines.append(dataframe_to_markdown(eval_by_model))
         lines.append("")
 
     if not run_time_by_model.empty:
-        lines.append("## Runtime by Model")
+        lines.append("## Tempo de Execução por Modelo")
         lines.append(dataframe_to_markdown(run_time_by_model))
         lines.append("")
 
     if not overview.empty:
-        lines.append("## Consolidated Overview")
+        lines.append("## Visão Consolidada")
         lines.append(dataframe_to_markdown(overview))
         lines.append("")
 
     if not manual_misclassification.empty:
-        lines.append("## Manual Misclassification Summary")
+        lines.append("## Resumo de Misclassificação Manual")
         manual_global = manual_misclassification[manual_misclassification["scope"] == "global"].copy()
         lines.append(dataframe_to_markdown(manual_global))
         lines.append("")
 
-    lines.append("## Generated Files")
-    lines.append("- raw_report_attempts.csv")
-    lines.append("- summary_report_attempt_completion_by_model.csv")
-    lines.append("- summary_report_attempt_completion_by_probe.csv")
-    lines.append("- summary_report_status_counts.csv")
-    lines.append("- summary_report_eval_detector.csv")
-    lines.append("- summary_report_eval_by_model.csv")
-    lines.append("- summary_report_eval_by_probe.csv")
-    lines.append("- summary_digest_group.csv")
-    lines.append("- summary_digest_probe.csv")
-    lines.append("- raw_report_runs.csv")
-    lines.append("- summary_runtime_by_probe.csv")
-    lines.append("- summary_runtime_by_model.csv")
-    lines.append("- summary_model_overview.csv")
-    lines.append("- summary_manual_misclassification_by_probe.csv")
-    lines.append("- plot_eval_pass_rate_by_model.png")
-    lines.append("- plot_eval_hit_rate_by_model.png")
-    lines.append("- plot_eval_pass_rate_by_probe_heatmap.png")
-    lines.append("- plot_eval_hit_rate_by_probe_heatmap.png")
-    lines.append("- plot_eval_pass_rate_probe_delta.png")
-    lines.append("- plot_detector_pass_rate_heatmap.png")
-    lines.append("- plot_digest_group_score.png")
-    lines.append("- plot_digest_probe_score_heatmap.png")
-    lines.append("- plot_runtime_total_by_model.png")
-    lines.append("- plot_runtime_by_probe_and_model.png")
-    lines.append("- plot_manual_misclassified_hits_censored_by_probe.png")
-    lines.append("- plot_manual_misclassified_hits_censored_global.png")
-    lines.append("- plot_manual_misclassified_passes_uncensored_by_probe.png")
-    lines.append("- plot_manual_misclassified_passes_uncensored_global.png")
+    lines.append("## Ficheiros Gerados")
+    lines.append(f"- {RAW_ATTEMPTS_FILE}")
+    lines.append(f"- {SUMMARY_ATTEMPTS_BY_MODEL_FILE}")
+    lines.append(f"- {SUMMARY_ATTEMPTS_BY_PROBE_FILE}")
+    lines.append(f"- {SUMMARY_STATUS_COUNTS_FILE}")
+    lines.append(f"- {SUMMARY_EVAL_DETECTOR_FILE}")
+    lines.append(f"- {SUMMARY_EVAL_BY_MODEL_FILE}")
+    lines.append(f"- {SUMMARY_EVAL_BY_PROBE_FILE}")
+    lines.append(f"- {SUMMARY_DIGEST_GROUP_FILE}")
+    lines.append(f"- {SUMMARY_DIGEST_PROBE_FILE}")
+    lines.append(f"- {RAW_RUNS_FILE}")
+    lines.append(f"- {SUMMARY_RUNTIME_BY_PROBE_FILE}")
+    lines.append(f"- {SUMMARY_RUNTIME_BY_MODEL_FILE}")
+    lines.append(f"- {SUMMARY_MODEL_OVERVIEW_FILE}")
+    lines.append(f"- {SUMMARY_MANUAL_MISCLASSIFICATION_FILE}")
+    lines.append(f"- {PLOT_POSITIVE_BY_MODEL_FILE}")
+    lines.append(f"- {PLOT_NEGATIVE_BY_MODEL_FILE}")
+    lines.append(f"- {PLOT_POSITIVE_BY_PROBE_FILE}")
+    lines.append(f"- {PLOT_NEGATIVE_BY_PROBE_FILE}")
+    lines.append(f"- {PLOT_POSITIVE_DELTA_FILE}")
+    lines.append(f"- {PLOT_DETECTOR_POSITIVE_FILE}")
+    lines.append(f"- {PLOT_DIGEST_GROUP_FILE}")
+    lines.append(f"- {PLOT_DIGEST_PROBE_FILE}")
+    lines.append(f"- {PLOT_RUNTIME_TOTAL_FILE}")
+    lines.append(f"- {PLOT_RUNTIME_BY_PROBE_FILE}")
+    lines.append(f"- {PLOT_MANUAL_HITS_CENSORED_PROBE_FILE}")
+    lines.append(f"- {PLOT_MANUAL_HITS_CENSORED_GLOBAL_FILE}")
+    lines.append(f"- {PLOT_MANUAL_PASSES_UNCENSORED_PROBE_FILE}")
+    lines.append(f"- {PLOT_MANUAL_PASSES_UNCENSORED_GLOBAL_FILE}")
 
-    (output_dir / "comparison_summary.md").write_text("\n".join(lines), encoding="utf-8")
+    (output_dir / SUMMARY_OUTPUT_FILE).write_text("\n".join(lines), encoding="utf-8")
 
 
 def clean_generated_outputs(output_dir: Path) -> None:
-    for pattern in ("raw_report_*.csv", "summary_*.csv", "comparison_summary.md"):
+    for pattern in (
+        "raw_report_*.csv",
+        "summary_*.csv",
+        "dados_brutos_*.csv",
+        "resumo_*.csv",
+        "comparison_summary.md",
+        "resumo_comparacao.md",
+    ):
         for artifact in output_dir.glob(pattern):
             if artifact.is_file():
                 artifact.unlink()
@@ -1101,42 +1159,36 @@ def run_analysis(
     )
 
     if not attempts.empty:
-        attempts.to_csv(output_dir / "raw_report_attempts.csv", index=False)
+        attempts.to_csv(output_dir / RAW_ATTEMPTS_FILE, index=False)
     if not report_eval.empty:
-        report_eval.to_csv(output_dir / "raw_report_eval.csv", index=False)
+        report_eval.to_csv(output_dir / RAW_EVAL_FILE, index=False)
     if not run_rows.empty:
-        run_rows.to_csv(output_dir / "raw_report_runs.csv", index=False)
+        run_rows.to_csv(output_dir / RAW_RUNS_FILE, index=False)
 
     if not attempt_completion_by_model.empty:
-        attempt_completion_by_model.to_csv(
-            output_dir / "summary_report_attempt_completion_by_model.csv", index=False
-        )
+        attempt_completion_by_model.to_csv(output_dir / SUMMARY_ATTEMPTS_BY_MODEL_FILE, index=False)
     if not attempt_completion_by_probe.empty:
-        attempt_completion_by_probe.to_csv(
-            output_dir / "summary_report_attempt_completion_by_probe.csv", index=False
-        )
+        attempt_completion_by_probe.to_csv(output_dir / SUMMARY_ATTEMPTS_BY_PROBE_FILE, index=False)
     if not status_distribution.empty:
-        status_distribution.to_csv(output_dir / "summary_report_status_counts.csv", index=False)
+        status_distribution.to_csv(output_dir / SUMMARY_STATUS_COUNTS_FILE, index=False)
     if not report_eval_summary.empty:
-        report_eval_summary.to_csv(output_dir / "summary_report_eval_detector.csv", index=False)
+        report_eval_summary.to_csv(output_dir / SUMMARY_EVAL_DETECTOR_FILE, index=False)
     if not eval_by_model.empty:
-        eval_by_model.to_csv(output_dir / "summary_report_eval_by_model.csv", index=False)
+        eval_by_model.to_csv(output_dir / SUMMARY_EVAL_BY_MODEL_FILE, index=False)
     if not eval_by_probe.empty:
-        eval_by_probe.to_csv(output_dir / "summary_report_eval_by_probe.csv", index=False)
+        eval_by_probe.to_csv(output_dir / SUMMARY_EVAL_BY_PROBE_FILE, index=False)
     if not digest_group_rows.empty:
-        digest_group_rows.to_csv(output_dir / "summary_digest_group.csv", index=False)
+        digest_group_rows.to_csv(output_dir / SUMMARY_DIGEST_GROUP_FILE, index=False)
     if not digest_probe_rows.empty:
-        digest_probe_rows.to_csv(output_dir / "summary_digest_probe.csv", index=False)
+        digest_probe_rows.to_csv(output_dir / SUMMARY_DIGEST_PROBE_FILE, index=False)
     if not run_time_by_probe.empty:
-        run_time_by_probe.to_csv(output_dir / "summary_runtime_by_probe.csv", index=False)
+        run_time_by_probe.to_csv(output_dir / SUMMARY_RUNTIME_BY_PROBE_FILE, index=False)
     if not run_time_by_model.empty:
-        run_time_by_model.to_csv(output_dir / "summary_runtime_by_model.csv", index=False)
+        run_time_by_model.to_csv(output_dir / SUMMARY_RUNTIME_BY_MODEL_FILE, index=False)
     if not overview.empty:
-        overview.to_csv(output_dir / "summary_model_overview.csv", index=False)
+        overview.to_csv(output_dir / SUMMARY_MODEL_OVERVIEW_FILE, index=False)
     if not manual_misclassification.empty:
-        manual_misclassification.to_csv(
-            output_dir / "summary_manual_misclassification_by_probe.csv", index=False
-        )
+        manual_misclassification.to_csv(output_dir / SUMMARY_MANUAL_MISCLASSIFICATION_FILE, index=False)
 
     save_plots(
         eval_by_model,
