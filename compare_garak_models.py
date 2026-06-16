@@ -663,6 +663,7 @@ def save_manual_misclassification_plot(
         & (manual_misclassification["original_kind"] == original_kind)
         & (manual_misclassification["scope"] == "probe")
     ].copy()
+    plot_data = plot_data[pd.to_numeric(plot_data["denominator"], errors="coerce").fillna(0) > 0]
     if plot_data.empty:
         return
 
@@ -1124,7 +1125,10 @@ def clean_generated_outputs(output_dir: Path) -> None:
     ):
         for artifact in output_dir.glob(pattern):
             if artifact.is_file():
-                artifact.unlink()
+                try:
+                    artifact.unlink()
+                except PermissionError:
+                    continue
 
 
 def run_analysis(
